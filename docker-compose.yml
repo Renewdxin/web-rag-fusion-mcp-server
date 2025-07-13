@@ -1,0 +1,192 @@
+version: '3.8'
+
+services:
+  # Main RAG MCP Server
+  rag-mcp-server:
+    build:
+      context: .
+      target: production
+      args:
+        BUILD_DATE: ${BUILD_DATE:-$(date -u +'%Y-%m-%dT%H:%M:%SZ')}
+        VERSION: ${VERSION:-latest}
+        VCS_REF: ${VCS_REF:-$(git rev-parse HEAD)}
+    container_name: rag-mcp-server
+    restart: unless-stopped
+    environment:
+      - ENVIRONMENT=production
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - VECTOR_STORE_PATH=/app/data
+      - COLLECTION_NAME=${COLLECTION_NAME:-rag_documents}
+      - SIMILARITY_THRESHOLD=${SIMILARITY_THRESHOLD:-0.75}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - TAVILY_API_KEY=${TAVILY_API_KEY}
+      - MAX_RETRIES=${MAX_RETRIES:-3}
+      - TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-30}
+      - WEB_SEARCH_TIMEOUT=${WEB_SEARCH_TIMEOUT:-45}
+      - TAVILY_QUOTA_LIMIT=${TAVILY_QUOTA_LIMIT:-1000}
+    volumes:
+      - rag_data:/app/data
+      - rag_logs:/app/logs
+      - ./documents:/app/documents:ro  # Mount local documents directory
+    networks:
+      - rag-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "from src.config import config; config.validate()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Development version with mounted source code
+  rag-mcp-dev:
+    build:
+      context: .
+      target: development
+    container_name: rag-mcp-dev
+    environment:
+      - ENVIRONMENT=development
+      - LOG_LEVEL=DEBUG
+      - VECTOR_STORE_PATH=/app/dev_data
+      - COLLECTION_NAME=dev_documents
+      - SIMILARITY_THRESHOLD=0.6
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - TAVILY_API_KEY=${TAVILY_API_KEY}
+    volumes:
+      - ./src:/app/src
+      - ./tests:/app/tests
+      - ./docs:/app/docs
+      - rag_dev_data:/app/dev_data
+      - rag_dev_logs:/app/logs
+      - ./documents:/app/documents:ro
+    networks:
+      - rag-network
+    profiles:
+      - dev
+    command: /bin/bash
+    stdin_open: true
+    tty: true
+
+  # Monitoring with Prometheus (optional)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: rag-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - rag-network
+    profiles:
+      - monitoring
+
+  # Grafana for dashboards (optional)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: rag-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    networks:
+      - rag-network
+    profiles:
+      - monitoring
+
+  # Redis for enhanced caching (optional)
+  redis:
+    image: redis:7-alpine
+    container_name: rag-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    networks:
+      - rag-network
+    profiles:
+      - cache
+
+  # PostgreSQL for metadata storage (optional)
+  postgres:
+    image: postgres:15-alpine
+    container_name: rag-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-ragmcp}
+      - POSTGRES_USER=${POSTGRES_USER:-raguser}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-ragpass}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    networks:
+      - rag-network
+    profiles:
+      - database
+
+  # Document processor service (for background processing)
+  doc-processor:
+    build:
+      context: .
+      target: production
+    container_name: rag-doc-processor
+    restart: unless-stopped
+    environment:
+      - ENVIRONMENT=production
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - VECTOR_STORE_PATH=/app/data
+      - PROCESSING_MODE=batch
+      - WATCH_DIRECTORY=/app/documents
+    volumes:
+      - rag_data:/app/data
+      - ./documents:/app/documents
+      - rag_logs:/app/logs
+    command: ["python", "src/document_processor.py", "--watch"]
+    networks:
+      - rag-network
+    profiles:
+      - processor
+    depends_on:
+      - rag-mcp-server
+
+volumes:
+  rag_data:
+    driver: local
+  rag_logs:
+    driver: local
+  rag_dev_data:
+    driver: local
+  rag_dev_logs:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  redis_data:
+    driver: local
+  postgres_data:
+    driver: local
+
+networks:
+  rag-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
