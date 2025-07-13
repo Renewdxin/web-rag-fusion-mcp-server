@@ -1,0 +1,46 @@
+# MCP RAG Server Dependencies
+# Python 3.9+ required
+
+# 核心 MCP 依赖
+mcp>=0.9.0
+
+# 向量存储和嵌入
+chromadb>=0.4.15
+sentence-transformers>=2.2.2
+numpy>=1.24.0
+
+# 网络搜索
+tavily-python>=0.3.0
+requests>=2.31.0
+httpx>=0.25.0
+
+# AI 和语言模型
+openai>=1.3.0
+tiktoken>=0.5.0
+
+# 文档处理
+langchain>=0.1.0
+langchain-community>=0.0.10
+langchain-openai>=0.0.5
+pypdf>=3.16.0
+python-docx>=0.8.11
+markdown>=3.5.0
+beautifulsoup4>=4.12.0
+
+# 数据处理
+pandas>=2.0.0
+pydantic>=2.0.0
+
+# 配置和环境
+python-dotenv>=1.0.0
+pyyaml>=6.0.1
+
+# 日志和监控
+structlog>=23.1.0
+
+# 异步和并发
+aiofiles>=23.2.1
+
+# 工具和实用程序
+jsonschema>=4.19.0
+typing-extensions>=4.7.0
