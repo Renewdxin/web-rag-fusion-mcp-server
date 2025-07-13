@@ -34,9 +34,8 @@ COPY src/ ./src/
 COPY config/ ./config/ 
 COPY *.md ./
 
-# Run tests to ensure image is working
-COPY tests/ ./tests/
-RUN python -m pytest tests/unit/ -v || echo "Tests completed"
+# Skip tests in build stage since tests directory may not exist
+# Tests will be run in CI/CD pipeline instead
 
 # Production stage
 FROM python:3.12-slim as production
@@ -79,6 +78,7 @@ COPY --from=builder /usr/local/bin/ /usr/local/bin/
 
 # Copy application code
 COPY --chown=raguser:raguser src/ ./src/
+COPY --chown=raguser:raguser config/ ./config/
 COPY --chown=raguser:raguser *.md ./
 COPY --chown=raguser:raguser requirements.txt ./
 
@@ -96,9 +96,9 @@ log() {
 health_check() {
     python -c "
 import sys
-sys.path.insert(0, '/app/src')
+sys.path.insert(0, '/app')
 try:
-    from config import config
+    from config.settings import config
     config.validate()
     print('✅ Configuration validation passed')
 except Exception as e:
@@ -124,7 +124,7 @@ chown raguser:raguser "${VECTOR_STORE_PATH}"
 
 # Start the server
 log "🌟 Launching MCP server..."
-exec python src/mcp_server.py "$@"
+exec python -m src.mcp_server "$@"
 EOF
 
 RUN chmod +x /app/entrypoint.sh
@@ -134,7 +134,7 @@ USER raguser
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "from src.config import config; config.validate()" || exit 1
+    CMD python -c "import sys; sys.path.insert(0, '/app'); from config.settings import config; config.validate()" || exit 1
 
 # Expose port (if needed for future HTTP interface)
 EXPOSE 8000
