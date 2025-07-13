@@ -18,10 +18,12 @@ import logging
 import time
 import uuid
 import json
+import re
 from typing import Any, Dict, List, Optional, Union
 from contextlib import asynccontextmanager
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
+from pathlib import Path
 
 # MCP imports
 from mcp.server import Server
@@ -39,6 +41,8 @@ except ImportError:
 
 # Local imports
 from config import config, ConfigurationError
+from vector_store import VectorStoreManager, Document, SearchResult, VectorStoreError
+from web_search import WebSearchManager, WebSearchResult, WebSearchError, RateLimitError, QuotaExceededError
 
 
 class RateLimiter:
@@ -105,6 +109,12 @@ class RAGMCPServer:
         
         # Cache tool schemas for validation
         self._tool_schemas = {}
+        
+        # Initialize vector store manager (lazy loading)
+        self._vector_store: Optional[VectorStoreManager] = None
+        
+        # Initialize web search manager (lazy loading)
+        self._web_search: Optional[WebSearchManager] = None
         
     def _setup_logging(self) -> logging.Logger:
         """Configure comprehensive logging."""
@@ -215,19 +225,18 @@ class RAGMCPServer:
                             "minLength": 1,
                             "maxLength": 1000
                         },
-                        "max_results": {
+                        "top_k": {
                             "type": "integer",
-                            "description": "Maximum number of results to return",
+                            "description": "Number of results to return",
                             "minimum": 1,
-                            "maximum": 50,
-                            "default": 10
+                            "maximum": 20,
+                            "default": 5
                         },
-                        "similarity_threshold": {
-                            "type": "number",
-                            "description": "Minimum similarity score for results (0.0-1.0)",
-                            "minimum": 0.0,
-                            "maximum": 1.0,
-                            "default": None  # Will use config.SIMILARITY_THRESHOLD
+                        "filter_dict": {
+                            "type": "object",
+                            "description": "Optional metadata filters for search results",
+                            "additionalProperties": True,
+                            "default": None
                         },
                         "include_metadata": {
                             "type": "boolean",
@@ -406,9 +415,9 @@ class RAGMCPServer:
                 async with asyncio.timeout(timeout_seconds):
                     # Pattern match on tool name to dispatch to appropriate handler
                     if name == "search_knowledge_base":
-                        result = await self._search_knowledge_base_internal(request_id, **arguments)
+                        result = await self._search_knowledge_base(request_id, **arguments)
                     elif name == "web_search":
-                        result = await self._search_web_internal(request_id, **arguments)
+                        result = await self._search_web(request_id, **arguments)
                     elif name == "smart_search":
                         result = await self._smart_search_internal(request_id, **arguments)
                     else:
@@ -454,12 +463,229 @@ class RAGMCPServer:
                 content=[TextContent(type="text", text=f"Error: {error_msg}")]
             )
     
-    async def _search_knowledge_base_internal(
+    async def _get_vector_store(self) -> VectorStoreManager:
+        """Get or initialize vector store manager."""
+        if self._vector_store is None:
+            try:
+                self._vector_store = VectorStoreManager(
+                    collection_name=config.COLLECTION_NAME if hasattr(config, 'COLLECTION_NAME') else "rag_documents",
+                    persist_directory=config.VECTOR_STORE_PATH if hasattr(config, 'VECTOR_STORE_PATH') else "./data"
+                )
+                await self._vector_store.initialize_collection()
+                self.logger.info("Vector store initialized successfully")
+            except Exception as e:
+                self.logger.error(f"Failed to initialize vector store: {e}")
+                raise VectorStoreError(f"Vector store initialization failed: {e}")
+        return self._vector_store
+    
+    async def _get_web_search(self) -> WebSearchManager:
+        """Get or initialize web search manager."""
+        if self._web_search is None:
+            try:
+                if not config.TAVILY_API_KEY:
+                    raise WebSearchError("Tavily API key not configured")
+                
+                self._web_search = WebSearchManager(
+                    api_key=config.TAVILY_API_KEY,
+                    timeout=getattr(config, 'WEB_SEARCH_TIMEOUT', 30),
+                    max_retries=getattr(config, 'MAX_RETRIES', 3),
+                    quota_limit=getattr(config, 'TAVILY_QUOTA_LIMIT', None)
+                )
+                self.logger.info("Web search manager initialized successfully")
+            except Exception as e:
+                self.logger.error(f"Failed to initialize web search manager: {e}")
+                raise WebSearchError(f"Web search initialization failed: {e}")
+        return self._web_search
+    
+    def _preprocess_query(self, query: str) -> Dict[str, Any]:
+        """
+        Preprocess search query for better results.
+        
+        Args:
+            query: Raw search query
+            
+        Returns:
+            Dictionary with processed query components
+        """
+        # Convert to lowercase
+        processed_query = query.lower().strip()
+        
+        # Remove special characters but keep spaces and hyphens
+        cleaned_query = re.sub(r'[^a-zA-Z0-9\s\-]', ' ', processed_query)
+        
+        # Extract keywords (words longer than 2 characters)
+        keywords = [word.strip() for word in cleaned_query.split() if len(word.strip()) > 2]
+        
+        # Create search variations
+        variations = [
+            query,  # Original query
+            processed_query,  # Lowercase
+            cleaned_query,  # Cleaned
+            ' '.join(keywords)  # Keywords only
+        ]
+        
+        return {
+            'original': query,
+            'processed': processed_query,
+            'cleaned': cleaned_query,
+            'keywords': keywords,
+            'variations': list(set(variations))  # Remove duplicates
+        }
+    
+    def _format_metadata(self, metadata: Dict[str, Any]) -> str:
+        """
+        Format metadata for display in a readable format.
+        
+        Args:
+            metadata: Document metadata dictionary
+            
+        Returns:
+            Formatted metadata string
+        """
+        if not metadata:
+            return "No metadata available"
+        
+        formatted_lines = []
+        
+        # Key metadata fields to display prominently
+        priority_fields = ['source', 'filename', 'file_type', 'created_at', 'modified']
+        
+        # Display priority fields first
+        for field in priority_fields:
+            if field in metadata:
+                value = metadata[field]
+                if isinstance(value, str) and len(value) > 50:
+                    value = value[:47] + "..."
+                formatted_lines.append(f"📄 {field.title()}: {value}")
+        
+        # Display other metadata
+        other_fields = {k: v for k, v in metadata.items() if k not in priority_fields}
+        if other_fields:
+            formatted_lines.append("📋 Additional:")
+            for key, value in list(other_fields.items())[:3]:  # Limit to 3 additional fields
+                if isinstance(value, (str, int, float, bool)):
+                    value_str = str(value)
+                    if len(value_str) > 30:
+                        value_str = value_str[:27] + "..."
+                    formatted_lines.append(f"   • {key}: {value_str}")
+        
+        return "\n".join(formatted_lines)
+    
+    def _highlight_content(self, content: str, keywords: List[str], max_length: int = 500) -> str:
+        """
+        Highlight search keywords in content and truncate if necessary.
+        
+        Args:
+            content: Document content
+            keywords: Keywords to highlight
+            max_length: Maximum content length
+            
+        Returns:
+            Highlighted and potentially truncated content
+        """
+        if not keywords:
+            # No keywords to highlight, just truncate if needed
+            if len(content) <= max_length:
+                return content
+            return content[:max_length-3] + "..."
+        
+        # Create case-insensitive pattern for all keywords
+        keyword_pattern = '|'.join(re.escape(kw) for kw in keywords if len(kw) > 2)
+        
+        if not keyword_pattern:
+            # No valid keywords, just truncate
+            if len(content) <= max_length:
+                return content
+            return content[:max_length-3] + "..."
+        
+        try:
+            # Find keyword matches
+            matches = list(re.finditer(keyword_pattern, content, re.IGNORECASE))
+            
+            if not matches:
+                # No matches found, just truncate
+                if len(content) <= max_length:
+                    return content
+                return content[:max_length-3] + "..."
+            
+            # If content is short enough, highlight in place
+            if len(content) <= max_length:
+                highlighted = re.sub(
+                    keyword_pattern, 
+                    lambda m: f"**{m.group()}**", 
+                    content, 
+                    flags=re.IGNORECASE
+                )
+                return highlighted
+            
+            # For long content, show context around first match
+            first_match = matches[0]
+            start_pos = max(0, first_match.start() - 100)
+            end_pos = min(len(content), first_match.end() + 300)
+            
+            excerpt = content[start_pos:end_pos]
+            if start_pos > 0:
+                excerpt = "..." + excerpt
+            if end_pos < len(content):
+                excerpt = excerpt + "..."
+            
+            # Highlight keywords in excerpt
+            highlighted = re.sub(
+                keyword_pattern,
+                lambda m: f"**{m.group()}**",
+                excerpt,
+                flags=re.IGNORECASE
+            )
+            
+            return highlighted
+            
+        except Exception as e:
+            self.logger.warning(f"Error highlighting content: {e}")
+            # Fallback to simple truncation
+            if len(content) <= max_length:
+                return content
+            return content[:max_length-3] + "..."
+    
+    def _sort_results(self, results: List[SearchResult]) -> List[SearchResult]:
+        """
+        Sort search results by similarity score and timestamp.
+        
+        Args:
+            results: List of search results
+            
+        Returns:
+            Sorted list of search results
+        """
+        def sort_key(result: SearchResult):
+            # Primary sort: similarity score (descending)
+            similarity = result.score
+            
+            # Secondary sort: timestamp if available (descending - newer first)
+            timestamp = 0
+            if result.document.metadata:
+                # Try different timestamp field names
+                for field in ['timestamp', 'created_at', 'modified', 'processing_time']:
+                    if field in result.document.metadata:
+                        try:
+                            if isinstance(result.document.metadata[field], str):
+                                # Try to parse datetime string
+                                timestamp = datetime.fromisoformat(result.document.metadata[field].replace('Z', '+00:00')).timestamp()
+                            elif isinstance(result.document.metadata[field], (int, float)):
+                                timestamp = float(result.document.metadata[field])
+                            break
+                        except (ValueError, TypeError):
+                            continue
+            
+            return (-similarity, -timestamp)  # Both descending
+        
+        return sorted(results, key=sort_key)
+    
+    async def _search_knowledge_base(
         self,
         request_id: str,
         query: str,
-        max_results: int = 10,
-        similarity_threshold: Optional[float] = None,
+        top_k: int = 5,
+        filter_dict: Optional[Dict[str, Any]] = None,
         include_metadata: bool = True
     ) -> List[TextContent]:
         """
@@ -468,39 +694,142 @@ class RAGMCPServer:
         Args:
             request_id: Unique request identifier for logging
             query: Search query string
-            max_results: Maximum number of results to return
-            similarity_threshold: Minimum similarity score threshold
+            top_k: Number of results to return (max 20)
+            filter_dict: Optional metadata filters
             include_metadata: Whether to include document metadata
             
         Returns:
-            List of TextContent with search results
+            List of TextContent with formatted search results
         """
-        self.logger.debug(f"[{request_id}] Searching knowledge base for: {query}")
+        search_start_time = time.time()
         
-        # Use config threshold if not provided
-        threshold = similarity_threshold or config.SIMILARITY_THRESHOLD
-        
-        # TODO: Implement actual vector database search
-        # This is a placeholder implementation
-        results = [
-            {
-                "content": f"Knowledge base result for '{query}' (placeholder)",
-                "similarity": 0.85,
-                "metadata": {"source": "local_db", "doc_id": "doc_1"} if include_metadata else None
-            }
-        ]
-        
-        response_text = f"Found {len(results)} results in knowledge base:\n\n"
-        for i, result in enumerate(results[:max_results], 1):
-            response_text += f"{i}. Content: {result['content']}\n"
-            response_text += f"   Similarity: {result['similarity']:.3f}\n"
-            if result['metadata']:
-                response_text += f"   Metadata: {result['metadata']}\n"
-            response_text += "\n"
-        
-        return [TextContent(type="text", text=response_text)]
+        try:
+            # Validate parameters
+            if not query or not query.strip():
+                return [TextContent(
+                    type="text", 
+                    text="❌ Error: Query cannot be empty. Please provide a search query."
+                )]
+            
+            if top_k < 1 or top_k > 20:
+                return [TextContent(
+                    type="text", 
+                    text="❌ Error: top_k must be between 1 and 20."
+                )]
+            
+            self.logger.info(f"[{request_id}] Searching knowledge base for: '{query}' (top_k={top_k})")
+            
+            # Preprocess query
+            query_info = self._preprocess_query(query)
+            self.logger.debug(f"[{request_id}] Query preprocessing: {query_info['keywords']}")
+            
+            # Get vector store
+            vector_store = await self._get_vector_store()
+            
+            # Perform similarity search
+            search_results = await vector_store.similarity_search_with_score(
+                query=query_info['processed'],
+                k=top_k,
+                filter_dict=filter_dict,
+                include_metadata=include_metadata
+            )
+            
+            # Sort results
+            sorted_results = self._sort_results(search_results)
+            
+            search_time = time.time() - search_start_time
+            
+            # Handle empty results
+            if not sorted_results:
+                friendly_message = (
+                    f"🔍 **No results found for '{query}'**\n\n"
+                    f"💡 **Suggestions:**\n"
+                    f"• Try different keywords or phrases\n"
+                    f"• Use broader terms\n"
+                    f"• Check spelling\n"
+                    f"• Try searching for partial matches\n\n"
+                    f"⏱️ Search completed in {search_time:.3f} seconds"
+                )
+                return [TextContent(type="text", text=friendly_message)]
+            
+            # Format results
+            response_lines = [
+                f"🔍 **Found {len(sorted_results)} result{'s' if len(sorted_results) != 1 else ''} for '{query}'**\n"
+            ]
+            
+            for i, result in enumerate(sorted_results, 1):
+                # Format similarity score
+                score_str = f"{result.score:.3f}"
+                score_emoji = "🟢" if result.score >= 0.8 else "🟡" if result.score >= 0.6 else "🔴"
+                
+                # Extract source file path
+                source_path = "Unknown source"
+                if result.document.metadata and 'source' in result.document.metadata:
+                    source_path = str(result.document.metadata['source'])
+                    # Make path clickable if it's a valid file path
+                    if source_path.startswith('/') or source_path.startswith('.'):
+                        try:
+                            path_obj = Path(source_path)
+                            if path_obj.exists():
+                                source_path = f"[{path_obj.name}]({source_path})"
+                            else:
+                                source_path = f"📄 {path_obj.name}"
+                        except Exception:
+                            source_path = f"📄 {source_path}"
+                
+                # Highlight and truncate content
+                highlighted_content = self._highlight_content(
+                    result.document.page_content, 
+                    query_info['keywords'],
+                    max_length=500
+                )
+                
+                # Build result entry
+                result_lines = [
+                    f"**{i}. {score_emoji} Similarity: {score_str}**",
+                    f"📂 **Source:** {source_path}",
+                    f"",  # Empty line
+                    f"📖 **Content:**",
+                    highlighted_content,
+                ]
+                
+                # Add metadata if requested
+                if include_metadata and result.document.metadata:
+                    metadata_str = self._format_metadata(result.document.metadata)
+                    result_lines.extend([
+                        f"",  # Empty line
+                        f"ℹ️ **Metadata:**",
+                        metadata_str
+                    ])
+                
+                result_lines.append("\n" + "-" * 50 + "\n")  # Separator
+                response_lines.extend(result_lines)
+            
+            # Add search statistics
+            response_lines.extend([
+                f"⏱️ **Search completed in {search_time:.3f} seconds**",
+                f"🎯 **Keywords used:** {', '.join(query_info['keywords'][:5])}"  # Show first 5 keywords
+            ])
+            
+            response_text = "\n".join(response_lines)
+            
+            self.logger.info(
+                f"[{request_id}] Knowledge base search completed: {len(sorted_results)} results in {search_time:.3f}s"
+            )
+            
+            return [TextContent(type="text", text=response_text)]
+            
+        except VectorStoreError as e:
+            error_msg = f"❌ **Vector store error:** {str(e)}"
+            self.logger.error(f"[{request_id}] Vector store error: {e}")
+            return [TextContent(type="text", text=error_msg)]
+            
+        except Exception as e:
+            error_msg = f"❌ **Search failed:** {str(e)}"
+            self.logger.error(f"[{request_id}] Unexpected error during search: {e}", exc_info=True)
+            return [TextContent(type="text", text=error_msg)]
     
-    async def _search_web_internal(
+    async def _search_web(
         self,
         request_id: str,
         query: str,
@@ -508,7 +837,7 @@ class RAGMCPServer:
         search_depth: str = "basic",
         include_answer: bool = True,
         include_raw_content: bool = False,
-        exclude_domains: List[str] = None
+        exclude_domains: Optional[List[str]] = None
     ) -> List[TextContent]:
         """
         Search the web using Tavily API.
@@ -523,30 +852,170 @@ class RAGMCPServer:
             exclude_domains: Domains to exclude
             
         Returns:
-            List of TextContent with web search results
+            List of TextContent with formatted web search results
         """
-        self.logger.debug(f"[{request_id}] Searching web for: {query}")
+        search_start_time = time.time()
         exclude_domains = exclude_domains or []
         
-        # TODO: Implement actual Tavily API integration
-        # This is a placeholder implementation
-        results = [
-            {
-                "title": f"Web result for '{query}' (placeholder)",
-                "url": "https://example.com",
-                "content": f"Web content about {query}",
-                "score": 0.9
-            }
-        ]
-        
-        response_text = f"Found {len(results)} web results:\n\n"
-        for i, result in enumerate(results[:max_results], 1):
-            response_text += f"{i}. {result['title']}\n"
-            response_text += f"   URL: {result['url']}\n"
-            response_text += f"   Score: {result['score']:.3f}\n"
-            response_text += f"   Content: {result['content']}\n\n"
-        
-        return [TextContent(type="text", text=response_text)]
+        try:
+            # Validate parameters
+            if not query or not query.strip():
+                return [TextContent(
+                    type="text", 
+                    text="❌ Error: Query cannot be empty. Please provide a search query."
+                )]
+            
+            if max_results < 1 or max_results > 20:
+                return [TextContent(
+                    type="text", 
+                    text="❌ Error: max_results must be between 1 and 20."
+                )]
+            
+            self.logger.info(f"[{request_id}] Searching web for: '{query}' (max_results={max_results})")
+            
+            # Get web search manager
+            web_search = await self._get_web_search()
+            
+            # Perform web search
+            search_results, metadata = await web_search.search(
+                query=query,
+                max_results=max_results,
+                search_depth=search_depth,
+                include_answer=include_answer,
+                include_raw_content=include_raw_content,
+                exclude_domains=exclude_domains
+            )
+            
+            search_time = time.time() - search_start_time
+            
+            # Handle errors in metadata
+            if 'error' in metadata:
+                error_type = metadata.get('error_type', 'WebSearchError')
+                error_msg = metadata['error']
+                
+                if error_type == 'QuotaExceededError':
+                    friendly_message = (
+                        f"🚫 **Daily API quota exceeded**\n\n"
+                        f"The web search service has reached its daily limit. "
+                        f"Please try again tomorrow or contact support for higher limits.\n\n"
+                        f"⏱️ Search attempted in {search_time:.3f} seconds"
+                    )
+                elif error_type == 'RateLimitError':
+                    friendly_message = (
+                        f"⏳ **Rate limit exceeded**\n\n"
+                        f"Too many requests in a short time. Please wait a moment and try again.\n\n"
+                        f"⏱️ Search attempted in {search_time:.3f} seconds"
+                    )
+                else:
+                    friendly_message = (
+                        f"🔍 **Web search temporarily unavailable**\n\n"
+                        f"**Error:** {error_msg}\n\n"
+                        f"💡 **Suggestions:**\n"
+                        f"• Try again in a few moments\n"
+                        f"• Check your internet connection\n"
+                        f"• Try a different search query\n\n"
+                        f"⏱️ Search attempted in {search_time:.3f} seconds"
+                    )
+                
+                return [TextContent(type="text", text=friendly_message)]
+            
+            # Handle empty results
+            if not search_results:
+                friendly_message = (
+                    f"🔍 **No web results found for '{query}'**\n\n"
+                    f"💡 **Suggestions:**\n"
+                    f"• Try different keywords\n"
+                    f"• Use more general terms\n"
+                    f"• Check spelling\n"
+                    f"• Try searching for related topics\n\n"
+                    f"⏱️ Search completed in {search_time:.3f} seconds"
+                )
+                
+                # Add cache info if available
+                if metadata.get('cache_hit'):
+                    friendly_message += "\n📋 Result retrieved from cache"
+                
+                return [TextContent(type="text", text=friendly_message)]
+            
+            # Format results
+            response_lines = [
+                f"🌐 **Found {len(search_results)} web result{'s' if len(search_results) != 1 else ''} for '{query}'**\n"
+            ]
+            
+            for i, result in enumerate(search_results, 1):
+                # Format score
+                score_str = f"{result.score:.3f}"
+                score_emoji = "🟢" if result.score >= 0.8 else "🟡" if result.score >= 0.6 else "🔴"
+                
+                # Format domain
+                domain_emoji = "🌐"
+                domain_name = result.source_domain or "Unknown"
+                
+                # Truncate content for display
+                display_content = result.content
+                if len(display_content) > 400:
+                    display_content = display_content[:397] + "..."
+                
+                # Build result entry
+                result_lines = [
+                    f"**{i}. {score_emoji} Score: {score_str}**",
+                    f"📰 **Title:** {result.title}",
+                    f"{domain_emoji} **Source:** [{domain_name}]({result.url})",
+                    f"",  # Empty line
+                    f"📄 **Content:**",
+                    display_content,
+                ]
+                
+                # Add metadata if available
+                if result.metadata:
+                    quality_score = result.metadata.get('quality_score')
+                    if quality_score is not None:
+                        quality_emoji = "✅" if quality_score >= 0.7 else "⚠️" if quality_score >= 0.5 else "❌"
+                        result_lines.append(f"\n{quality_emoji} **Quality Score:** {quality_score:.2f}")
+                
+                result_lines.append("\n" + "-" * 50 + "\n")  # Separator
+                response_lines.extend(result_lines)
+            
+            # Add search metadata
+            response_lines.extend([
+                f"⏱️ **Search completed in {search_time:.3f} seconds**"
+            ])
+            
+            # Add cache info
+            if metadata.get('cache_hit'):
+                response_lines.append("📋 **Result retrieved from cache**")
+            else:
+                response_lines.append("🔄 **Fresh results from web**")
+            
+            # Add query optimization info if available
+            query_opt = metadata.get('query_optimization')
+            if query_opt and query_opt.get('keywords'):
+                keywords = query_opt['keywords'][:5]  # Show first 5 keywords
+                response_lines.append(f"🎯 **Keywords used:** {', '.join(keywords)}")
+            
+            # Add quota info if available
+            quota_info = metadata.get('quota_info')
+            if quota_info and quota_info.get('quota_limit'):
+                usage_pct = quota_info.get('usage_percentage', 0)
+                response_lines.append(f"📊 **API Usage:** {usage_pct:.1f}% of daily quota")
+            
+            response_text = "\n".join(response_lines)
+            
+            self.logger.info(
+                f"[{request_id}] Web search completed: {len(search_results)} results in {search_time:.3f}s"
+            )
+            
+            return [TextContent(type="text", text=response_text)]
+            
+        except WebSearchError as e:
+            error_msg = f"🔍 **Web search error:** {str(e)}"
+            self.logger.error(f"[{request_id}] Web search error: {e}")
+            return [TextContent(type="text", text=error_msg)]
+            
+        except Exception as e:
+            error_msg = f"❌ **Search failed:** {str(e)}"
+            self.logger.error(f"[{request_id}] Unexpected error during web search: {e}", exc_info=True)
+            return [TextContent(type="text", text=error_msg)]
     
     async def _smart_search_internal(
         self,
@@ -578,11 +1047,10 @@ class RAGMCPServer:
         self.logger.debug(f"[{request_id}] Performing smart search for: {query}")
         
         # First, search local knowledge base
-        local_results = await self._search_knowledge_base_internal(
+        local_results = await self._search_knowledge_base(
             request_id=request_id,
             query=query,
-            max_results=local_max_results,
-            similarity_threshold=local_threshold,
+            top_k=local_max_results,
             include_metadata=include_sources
         )
         
@@ -595,7 +1063,7 @@ class RAGMCPServer:
         response_text += local_results[0].text + "\n"
         
         if need_web_search and web_max_results > 0:
-            web_results = await self._search_web_internal(
+            web_results = await self._search_web(
                 request_id=request_id,
                 query=query,
                 max_results=web_max_results,
@@ -655,6 +1123,8 @@ class RAGMCPServer:
         # Validate API keys are present (if web search will be used)
         if not config.TAVILY_API_KEY:
             self.logger.warning("TAVILY_API_KEY not configured - web search will be unavailable")
+        else:
+            self.logger.info("Tavily API key configured - web search available")
         
         self.logger.info("All startup dependencies validated successfully")
     
@@ -690,6 +1160,9 @@ class RAGMCPServer:
             self.logger.error(f"Fatal error in server: {e}", exc_info=True)
             raise
         finally:
+            # Clean up resources
+            if self._web_search:
+                await self._web_search.close()
             self.logger.info("RAG MCP Server shutdown complete")
 
 
