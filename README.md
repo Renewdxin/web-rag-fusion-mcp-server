@@ -25,7 +25,7 @@ A production-ready Model Context Protocol (MCP) server that provides intelligent
 ## 📋 Quick Start
 
 ### Prerequisites
-- Python 3.8+
+- Python 3.12+
 - OpenAI API key (for embeddings)
 - Tavily API key (for web search)
 

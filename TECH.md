@@ -37,7 +37,7 @@ The RAG MCP Server is a production-ready Model Context Protocol (MCP) server tha
 ## Technical Stack
 
 ### Backend Technologies
-- **Python 3.8+**: Core runtime environment
+- **Python 3.12+**: Core runtime environment with latest language features
 - **AsyncIO**: Asynchronous I/O operations and concurrency
 - **ChromaDB**: Vector database for semantic search
 - **SQLite**: Persistent caching layer
@@ -476,12 +476,14 @@ CACHE_TTL_HOURS=24
 - CPU: 2 cores
 - RAM: 4GB
 - Storage: 10GB SSD
+- Python: 3.12 or higher
 - Network: Reliable internet connection
 
 **Recommended Production**:
 - CPU: 4+ cores
 - RAM: 8GB+
 - Storage: 50GB+ SSD
+- Python: 3.12 (latest stable)
 - Network: High-bandwidth connection
 
 ### Health Checks

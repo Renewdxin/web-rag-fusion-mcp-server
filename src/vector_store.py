@@ -66,7 +66,7 @@ except ImportError:
 
 # Local imports
 try:
-    from config import config, ConfigurationError
+    from config.settings import config, ConfigurationError
 except ImportError:
     config = None
     ConfigurationError = Exception
@@ -658,7 +658,7 @@ class VectorStoreManager:
         self.document_processor = DocumentProcessor(enable_deduplication)
         
         # State
-        self._client: Optional[chromadb.PersistentClient] = None
+        self._client: Optional[Any] = None
         self._collection: Optional[Collection] = None
         self._metadata_manager: Optional[MetadataManager] = None
         self._is_initialized = False
@@ -682,8 +682,11 @@ class VectorStoreManager:
                 self.logger.warning(f"Failed to create default embedding function: {e}")
         return None
     
-    async def _initialize_client(self) -> chromadb.PersistentClient:
+    async def _initialize_client(self) -> Optional[Any]:
         """Initialize ChromaDB client with retry logic."""
+        if not CHROMADB_AVAILABLE:
+            raise VectorStoreError("ChromaDB is not available - please install chromadb")
+            
         for attempt in range(self.connection_retries + 1):
             try:
                 self.logger.info(f"Initializing ChromaDB client (attempt {attempt + 1})")
@@ -720,7 +723,7 @@ class VectorStoreManager:
                 else:
                     raise VectorStoreError(f"Failed to initialize ChromaDB after {self.connection_retries + 1} attempts: {e}")
     
-    async def _ensure_healthy_connection(self) -> chromadb.PersistentClient:
+    async def _ensure_healthy_connection(self) -> Optional[Any]:
         """Ensure ChromaDB connection is healthy."""
         current_time = time.time()
         

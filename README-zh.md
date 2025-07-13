@@ -25,7 +25,7 @@
 ## 📋 快速开始
 
 ### 前置要求
-- Python 3.8+
+- Python 3.12+
 - OpenAI API 密钥（用于嵌入）
 - Tavily API 密钥（用于网络搜索）
 

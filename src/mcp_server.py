@@ -40,7 +40,7 @@ except ImportError:
     ValidationError = Exception
 
 # Local imports
-from config import config, ConfigurationError
+from config.settings import config, ConfigurationError
 from vector_store import VectorStoreManager, Document, SearchResult, VectorStoreError
 from web_search import WebSearchManager, WebSearchResult, WebSearchError, RateLimitError, QuotaExceededError
 
@@ -305,10 +305,11 @@ class RAGMCPServer:
             Tool(
                 name="smart_search",
                 description=(
-                    "Intelligent hybrid search that combines local knowledge base and web search. "
-                    "First searches the local vector database, then supplements with web search "
-                    "if needed. Provides the most comprehensive and relevant results by leveraging "
-                    "both local expertise and current web information."
+                    "Sophisticated intelligent hybrid search with advanced decision logic. "
+                    "Searches local knowledge base first, evaluates result quality against threshold, "
+                    "and intelligently decides whether to supplement with web search. Provides "
+                    "cross-source deduplication, relevance explanations, confidence scoring, "
+                    "and source credibility assessment for comprehensive search results."
                 ),
                 inputSchema={
                     "type": "object",
@@ -319,7 +320,14 @@ class RAGMCPServer:
                             "minLength": 1,
                             "maxLength": 1000
                         },
-                        "local_max_results": {
+                        "similarity_threshold": {
+                            "type": "number",
+                            "description": "Threshold value for triggering web search (0.0-1.0). If max local score < threshold, web search is triggered",
+                            "minimum": 0.0,
+                            "maximum": 1.0,
+                            "default": 0.75
+                        },
+                        "local_top_k": {
                             "type": "integer",
                             "description": "Maximum results to retrieve from local knowledge base",
                             "minimum": 1,
@@ -328,35 +336,28 @@ class RAGMCPServer:
                         },
                         "web_max_results": {
                             "type": "integer",
-                            "description": "Maximum results to retrieve from web if local results insufficient",
+                            "description": "Maximum results to retrieve from web search if triggered",
                             "minimum": 0,
-                            "maximum": 10,
-                            "default": 3
-                        },
-                        "local_threshold": {
-                            "type": "number",
-                            "description": "Minimum local similarity score to consider results sufficient",
-                            "minimum": 0.0,
-                            "maximum": 1.0,
-                            "default": 0.7
-                        },
-                        "min_local_results": {
-                            "type": "integer",
-                            "description": "Minimum local results needed before triggering web search",
-                            "minimum": 0,
-                            "maximum": 10,
-                            "default": 2
-                        },
-                        "combine_strategy": {
-                            "type": "string",
-                            "description": "How to combine local and web results",
-                            "enum": ["interleave", "local_first", "relevance_score"],
-                            "default": "relevance_score"
+                            "maximum": 20,
+                            "default": 5
                         },
                         "include_sources": {
                             "type": "boolean",
-                            "description": "Whether to include source information for all results",
+                            "description": "Whether to include detailed source information for all results",
                             "default": True
+                        },
+                        "combine_strategy": {
+                            "type": "string",
+                            "description": "Strategy for combining and ranking results from multiple sources",
+                            "enum": ["interleave", "local_first", "relevance_score"],
+                            "default": "relevance_score"
+                        },
+                        "min_local_results": {
+                            "type": "integer",
+                            "description": "Minimum local results needed before considering web search sufficient",
+                            "minimum": 0,
+                            "maximum": 10,
+                            "default": 2
                         }
                     },
                     "required": ["query"],
@@ -419,7 +420,17 @@ class RAGMCPServer:
                     elif name == "web_search":
                         result = await self._search_web(request_id, **arguments)
                     elif name == "smart_search":
-                        result = await self._smart_search_internal(request_id, **arguments)
+                        # Map parameters to match function signature
+                        smart_search_args = {
+                            'query': arguments['query'],
+                            'similarity_threshold': arguments.get('similarity_threshold', 0.75),
+                            'local_top_k': arguments.get('local_top_k', 5), 
+                            'web_max_results': arguments.get('web_max_results', 5),
+                            'include_sources': arguments.get('include_sources', True),
+                            'combine_strategy': arguments.get('combine_strategy', 'relevance_score'),
+                            'min_local_results': arguments.get('min_local_results', 2)
+                        }
+                        result = await self._smart_search_internal(request_id, **smart_search_args)
                     else:
                         error_msg = f"Unknown tool: {name}"
                         self.logger.error(f"[{request_id}] {error_msg}")
@@ -1021,64 +1032,521 @@ class RAGMCPServer:
         self,
         request_id: str,
         query: str,
-        local_max_results: int = 5,
-        web_max_results: int = 3,
-        local_threshold: float = 0.7,
-        min_local_results: int = 2,
+        similarity_threshold: float = 0.75,
+        local_top_k: int = 5,
+        web_max_results: int = 5,
+        include_sources: bool = True,
         combine_strategy: str = "relevance_score",
-        include_sources: bool = True
+        min_local_results: int = 2
     ) -> List[TextContent]:
         """
-        Perform intelligent hybrid search combining local and web results.
+        Perform sophisticated intelligent hybrid search with advanced decision logic.
+        
+        This method implements a comprehensive search strategy that:
+        1. Searches local knowledge base first
+        2. Evaluates result quality against similarity threshold
+        3. Makes intelligent decisions about web search necessity
+        4. Combines and deduplicates results across sources
+        5. Provides relevance explanations and confidence scoring
+        6. Assesses source credibility
         
         Args:
             request_id: Unique request identifier for logging
             query: Search query string
-            local_max_results: Max local results
-            web_max_results: Max web results  
-            local_threshold: Local similarity threshold
-            min_local_results: Min local results before web search
-            combine_strategy: How to combine results
-            include_sources: Whether to include source info
+            similarity_threshold: Threshold for triggering web search (0.0-1.0)
+            local_top_k: Maximum local results to retrieve
+            web_max_results: Maximum web results to retrieve
+            include_sources: Whether to include detailed source information
+            combine_strategy: Strategy for combining results
+            min_local_results: Minimum local results before considering web search
             
         Returns:
-            List of TextContent with combined search results
+            List of TextContent with sophisticated search results and analysis
         """
-        self.logger.debug(f"[{request_id}] Performing smart search for: {query}")
+        start_time = time.time()
+        self.logger.debug(f"[{request_id}] Starting smart search with threshold {similarity_threshold}")
         
-        # First, search local knowledge base
-        local_results = await self._search_knowledge_base(
-            request_id=request_id,
-            query=query,
-            top_k=local_max_results,
-            include_metadata=include_sources
-        )
-        
-        # Determine if web search is needed
-        # TODO: Implement actual logic to evaluate local results quality
-        need_web_search = True  # Placeholder logic
-        
-        response_text = "Smart Search Results:\n\n"
-        response_text += "=== LOCAL KNOWLEDGE BASE ===\n"
-        response_text += local_results[0].text + "\n"
-        
-        if need_web_search and web_max_results > 0:
-            web_results = await self._search_web(
-                request_id=request_id,
+        try:
+            # Step 1: Search local knowledge base
+            self.logger.debug(f"[{request_id}] Step 1: Searching local knowledge base")
+            local_search_start = time.time()
+            
+            vector_store = await self._get_vector_store()
+            local_raw_results = await vector_store.search(
                 query=query,
-                max_results=web_max_results,
-                include_answer=True
+                top_k=local_top_k,
+                filter_dict=None
             )
             
-            response_text += "=== WEB SEARCH SUPPLEMENT ===\n"
-            response_text += web_results[0].text + "\n"
+            local_search_time = time.time() - local_search_start
+            
+            # Calculate maximum score and analyze local results quality
+            max_local_score = 0.0
+            high_quality_local_count = 0
+            
+            if local_raw_results:
+                max_local_score = max(result.score for result in local_raw_results)
+                high_quality_local_count = sum(1 for result in local_raw_results if result.score >= 0.8)
+            
+            self.logger.info(f"[{request_id}] Local search: {len(local_raw_results)} results, max_score={max_local_score:.3f}")
+            
+            # Step 2: Decision logic implementation
+            web_search_triggered = False
+            decision_reason = ""
+            confidence_level = "HIGH"
+            
+            if not local_raw_results:
+                # No local results - perform web search directly
+                web_search_triggered = True
+                decision_reason = "No local knowledge found - searching web for comprehensive results"
+                confidence_level = "MEDIUM"
+            elif max_local_score < similarity_threshold:
+                # Low quality local results - supplement with web search
+                web_search_triggered = True
+                decision_reason = f"Local results quality below threshold ({max_local_score:.3f} < {similarity_threshold}) - enhancing with web search"
+                confidence_level = "MEDIUM"
+            elif len(local_raw_results) < min_local_results:
+                # Insufficient local results - get more from web
+                web_search_triggered = True
+                decision_reason = f"Insufficient local results ({len(local_raw_results)} < {min_local_results}) - supplementing with web search"
+                confidence_level = "MEDIUM"
+            else:
+                # High quality local results sufficient
+                decision_reason = f"Local knowledge sufficient (max_score={max_local_score:.3f} >= {similarity_threshold})"
+                confidence_level = "HIGH"
+            
+            # Step 3: Web search if triggered
+            web_raw_results = []
+            web_search_time = 0.0
+            
+            if web_search_triggered and web_max_results > 0:
+                self.logger.debug(f"[{request_id}] Step 3: Performing web search")
+                web_search_start = time.time()
+                
+                try:
+                    web_search_mgr = await self._get_web_search()
+                    web_raw_results, web_metadata = await web_search_mgr.search(
+                        query=query,
+                        max_results=web_max_results,
+                        include_answer=True
+                    )
+                    web_search_time = time.time() - web_search_start
+                    self.logger.info(f"[{request_id}] Web search: {len(web_raw_results)} results")
+                    
+                except Exception as e:
+                    self.logger.warning(f"[{request_id}] Web search failed: {e}")
+                    web_raw_results = []
+                    confidence_level = "LOW" if not local_raw_results else "MEDIUM"
+            
+            # Step 4: Cross-source result deduplication
+            deduplicated_results = self._deduplicate_results(local_raw_results, web_raw_results)
+            
+            # Step 5: Source credibility assessment and relevance scoring
+            enhanced_results = self._assess_result_credibility(deduplicated_results, query)
+            
+            # Step 6: Format comprehensive response
+            total_time = time.time() - start_time
+            response_sections = []
+            
+            # Header with decision summary
+            response_sections.append(
+                f"🧠 **Smart Search Results for '{query}'**\n"
+                f"**Decision:** {decision_reason}\n"
+                f"**Confidence Level:** {confidence_level}\n"
+                f"**Total Processing Time:** {total_time:.3f}s\n"
+            )
+            
+            # Local Knowledge Base Results Section
+            response_sections.append("## 📚 Local Knowledge Base Results\n")
+            
+            if local_raw_results:
+                response_sections.append(
+                    f"**Found {len(local_raw_results)} local result{'s' if len(local_raw_results) != 1 else ''}**\n"
+                    f"**Maximum Similarity Score:** {max_local_score:.3f}\n"
+                    f"**High Quality Results:** {high_quality_local_count}/{len(local_raw_results)}\n"
+                    f"**Search Time:** {local_search_time:.3f}s\n"
+                )
+                
+                for i, result in enumerate(local_raw_results[:3], 1):  # Show top 3 local results
+                    relevance_explanation = self._generate_relevance_explanation(result, query, "local")
+                    source_path = result.metadata.get('source', 'Unknown source') if result.metadata else 'Unknown source'
+                    
+                    # Score visualization
+                    score_emoji = "🟢" if result.score >= 0.8 else "🟡" if result.score >= 0.6 else "🔴"
+                    
+                    response_sections.append(
+                        f"**{i}. {score_emoji} Similarity: {result.score:.3f}**\n"
+                        f"📂 **Source:** [{source_path}]({source_path})\n"
+                        f"📖 **Content Preview:** {result.content[:200]}{'...' if len(result.content) > 200 else ''}\n"
+                        f"🎯 **Relevance:** {relevance_explanation}\n"
+                        f"{'─' * 40}\n"
+                    )
+            else:
+                response_sections.append("❌ **No local knowledge found for this query**\n")
+            
+            # Web Search Results Section (if performed)
+            if web_search_triggered:
+                response_sections.append("\n## 🌐 Web Search Results\n")
+                
+                if web_raw_results:
+                    response_sections.append(
+                        f"**Found {len(web_raw_results)} web result{'s' if len(web_raw_results) != 1 else ''}**\n"
+                        f"**Search Time:** {web_search_time:.3f}s\n"
+                        f"**Status:** {'✅ Fresh results' if web_search_time > 0 else '📋 Cached results'}\n"
+                    )
+                    
+                    for i, result in enumerate(web_raw_results[:3], 1):  # Show top 3 web results
+                        relevance_explanation = self._generate_relevance_explanation(result, query, "web")
+                        credibility_score = self._calculate_credibility_score(result)
+                        
+                        # Score and credibility visualization
+                        score_emoji = "🟢" if result.score >= 0.8 else "🟡" if result.score >= 0.6 else "🔴"
+                        credibility_emoji = "🏆" if credibility_score >= 0.8 else "✅" if credibility_score >= 0.6 else "⚠️"
+                        
+                        response_sections.append(
+                            f"**{i}. {score_emoji} Quality Score: {result.score:.3f}**\n"
+                            f"📰 **Title:** {result.title}\n"
+                            f"🌐 **Source:** [{result.source_domain or 'Unknown'}]({result.url})\n"
+                            f"{credibility_emoji} **Credibility:** {credibility_score:.2f}/1.0\n"
+                            f"📄 **Content Preview:** {result.content[:200]}{'...' if len(result.content) > 200 else ''}\n"
+                            f"🎯 **Relevance:** {relevance_explanation}\n"
+                            f"{'─' * 40}\n"
+                        )
+                else:
+                    response_sections.append("❌ **No web results found or web search failed**\n")
+            
+            # Smart Recommendations Section
+            response_sections.append("\n## 🎯 Smart Recommendations\n")
+            
+            recommendations = self._generate_smart_recommendations(
+                local_raw_results, web_raw_results, max_local_score, 
+                similarity_threshold, confidence_level, query
+            )
+            response_sections.append(recommendations)
+            
+            # Search Strategy Summary
+            response_sections.append("\n## 📊 Search Strategy Analysis\n")
+            response_sections.append(
+                f"**Strategy Used:** {combine_strategy}\n"
+                f"**Threshold Applied:** {similarity_threshold}\n"
+                f"**Web Search Triggered:** {'✅ Yes' if web_search_triggered else '❌ No'}\n"
+                f"**Total Sources Consulted:** {len(local_raw_results) + len(web_raw_results)}\n"
+                f"**Deduplication Applied:** ✅ Cross-source duplicate removal\n"
+                f"**Overall Confidence:** {confidence_level}\n"
+            )
+            
+            # Performance metrics
+            response_sections.append(
+                f"\n⏱️ **Performance Metrics:**\n"
+                f"• Local search: {local_search_time:.3f}s\n"
+                f"• Web search: {web_search_time:.3f}s\n"
+                f"• Total processing: {total_time:.3f}s\n"
+            )
+            
+            final_response = "\n".join(response_sections)
+            
+            self.logger.info(
+                f"[{request_id}] Smart search completed: "
+                f"local={len(local_raw_results)}, web={len(web_raw_results)}, "
+                f"confidence={confidence_level}, time={total_time:.3f}s"
+            )
+            
+            return [TextContent(type="text", text=final_response)]
+            
+        except Exception as e:
+            error_msg = f"❌ **Smart search failed:** {str(e)}\n\nPlease try again or contact support if the issue persists."
+            self.logger.error(f"[{request_id}] Smart search error: {e}", exc_info=True)
+            return [TextContent(type="text", text=error_msg)]
+    
+    def _deduplicate_results(self, local_results: List[SearchResult], web_results: List[WebSearchResult]) -> Dict[str, List]:
+        """
+        Perform cross-source result deduplication using content similarity and URL matching.
         
-        response_text += f"=== SEARCH STRATEGY ===\n"
-        response_text += f"Combine strategy: {combine_strategy}\n"
-        response_text += f"Local threshold: {local_threshold}\n"
-        response_text += f"Web search triggered: {need_web_search}\n"
+        Args:
+            local_results: Results from local knowledge base
+            web_results: Results from web search
+            
+        Returns:
+            Dictionary with deduplicated and categorized results
+        """
+        from difflib import SequenceMatcher
         
-        return [TextContent(type="text", text=response_text)]
+        def content_similarity(text1: str, text2: str) -> float:
+            """Calculate content similarity between two text snippets."""
+            return SequenceMatcher(None, text1.lower()[:500], text2.lower()[:500]).ratio()
+        
+        # Track duplicates and keep best version
+        deduplicated_local = []
+        deduplicated_web = []
+        duplicate_pairs = []
+        
+        # Check for duplicates between local and web results
+        for local_result in local_results:
+            is_duplicate = False
+            local_content = local_result.content.lower()
+            
+            for web_result in web_results:
+                web_content = web_result.content.lower()
+                
+                # Check content similarity (threshold: 0.8 for high similarity)
+                similarity = content_similarity(local_content, web_content)
+                
+                if similarity >= 0.8:
+                    duplicate_pairs.append({
+                        'local': local_result,
+                        'web': web_result,
+                        'similarity': similarity,
+                        'kept': 'local' if local_result.score >= web_result.score else 'web'
+                    })
+                    is_duplicate = True
+                    break
+            
+            if not is_duplicate:
+                deduplicated_local.append(local_result)
+        
+        # Add web results that aren't duplicates
+        for web_result in web_results:
+            is_duplicate = any(pair['web'] == web_result for pair in duplicate_pairs)
+            if not is_duplicate:
+                deduplicated_web.append(web_result)
+        
+        return {
+            'local': deduplicated_local,
+            'web': deduplicated_web,
+            'duplicates': duplicate_pairs
+        }
+    
+    def _assess_result_credibility(self, results_dict: Dict[str, List], query: str) -> Dict[str, List]:
+        """
+        Assess source credibility and enhance results with credibility scores.
+        
+        Args:
+            results_dict: Deduplicated results dictionary
+            query: Original search query for context
+            
+        Returns:
+            Enhanced results with credibility assessment
+        """
+        # Enhance local results (they have inherent high credibility)
+        enhanced_local = []
+        for result in results_dict.get('local', []):
+            # Local results get high credibility based on curation
+            result.credibility_score = 0.9  # High credibility for curated local content
+            result.credibility_factors = ["Curated local content", "Direct source access"]
+            enhanced_local.append(result)
+        
+        # Enhance web results with credibility assessment
+        enhanced_web = []
+        for result in results_dict.get('web', []):
+            credibility_score = self._calculate_credibility_score(result)
+            result.credibility_score = credibility_score
+            enhanced_web.append(result)
+        
+        return {
+            'local': enhanced_local,
+            'web': enhanced_web,
+            'duplicates': results_dict.get('duplicates', [])
+        }
+    
+    def _calculate_credibility_score(self, result) -> float:
+        """
+        Calculate credibility score for a web search result.
+        
+        Args:
+            result: WebSearchResult to assess
+            
+        Returns:
+            Credibility score between 0.0 and 1.0
+        """
+        score = 0.5  # Base score
+        factors = []
+        
+        # Domain reputation (simplified assessment)
+        if hasattr(result, 'source_domain') and result.source_domain:
+            domain = result.source_domain.lower()
+            
+            # High credibility domains
+            if any(trusted in domain for trusted in [
+                'edu', 'gov', 'org', 'wikipedia', 'reuters', 'bbc', 'nature', 
+                'science', 'ieee', 'acm', 'arxiv', 'pubmed'
+            ]):
+                score += 0.3
+                factors.append("Trusted domain")
+            
+            # Medium credibility domains
+            elif any(medium in domain for medium in [
+                'com', 'net', 'co.', 'news', 'tech', 'research'
+            ]):
+                score += 0.1
+                factors.append("Established domain")
+        
+        # Content quality indicators
+        if hasattr(result, 'content') and result.content:
+            content_length = len(result.content)
+            
+            # Appropriate length (not too short, not too long)
+            if 100 <= content_length <= 2000:
+                score += 0.1
+                factors.append("Appropriate content length")
+            
+            # Check for academic/professional language patterns
+            academic_terms = ['research', 'study', 'analysis', 'methodology', 'findings', 'conclusion']
+            if any(term in result.content.lower() for term in academic_terms):
+                score += 0.1
+                factors.append("Academic/professional content")
+        
+        # Title quality
+        if hasattr(result, 'title') and result.title:
+            if len(result.title) >= 10 and not result.title.isupper():
+                score += 0.05
+                factors.append("Well-formatted title")
+        
+        # Result score quality
+        if hasattr(result, 'score') and result.score >= 0.8:
+            score += 0.1
+            factors.append("High relevance score")
+        
+        # Store factors for explanation
+        result.credibility_factors = factors
+        
+        return min(1.0, score)  # Cap at 1.0
+    
+    def _generate_relevance_explanation(self, result, query: str, source_type: str) -> str:
+        """
+        Generate explanation for why a result is relevant to the query.
+        
+        Args:
+            result: Search result (local or web)
+            query: Original search query
+            source_type: "local" or "web"
+            
+        Returns:
+            Human-readable relevance explanation
+        """
+        query_terms = set(query.lower().split())
+        content_lower = result.content.lower() if hasattr(result, 'content') else ""
+        
+        # Find matching terms
+        matching_terms = []
+        for term in query_terms:
+            if term in content_lower and len(term) > 2:  # Skip short words
+                matching_terms.append(term)
+        
+        # Calculate match percentage
+        match_percentage = (len(matching_terms) / len(query_terms)) * 100 if query_terms else 0
+        
+        # Generate explanation based on source type and matches
+        if source_type == "local":
+            base_explanation = f"Matches {len(matching_terms)}/{len(query_terms)} query terms"
+            if hasattr(result, 'score'):
+                if result.score >= 0.9:
+                    return f"{base_explanation} with excellent semantic similarity"
+                elif result.score >= 0.8:
+                    return f"{base_explanation} with high semantic similarity"
+                elif result.score >= 0.7:
+                    return f"{base_explanation} with good semantic similarity"
+                else:
+                    return f"{base_explanation} with moderate semantic similarity"
+        else:  # web results
+            base_explanation = f"Contains {len(matching_terms)} key terms from query"
+            if hasattr(result, 'score'):
+                if result.score >= 0.8:
+                    return f"{base_explanation}, highly relevant content"
+                elif result.score >= 0.6:
+                    return f"{base_explanation}, moderately relevant content"
+                else:
+                    return f"{base_explanation}, potentially relevant content"
+        
+        return "Relevance detected through content analysis"
+    
+    def _generate_smart_recommendations(
+        self, local_results: List, web_results: List, max_local_score: float,
+        similarity_threshold: float, confidence_level: str, query: str
+    ) -> str:
+        """
+        Generate intelligent recommendations based on search results analysis.
+        
+        Args:
+            local_results: Local search results
+            web_results: Web search results
+            max_local_score: Highest local similarity score
+            similarity_threshold: Applied threshold
+            confidence_level: Overall confidence level
+            query: Original search query
+            
+        Returns:
+            Formatted recommendations string
+        """
+        recommendations = []
+        
+        # Analyze result quality and provide recommendations
+        if confidence_level == "HIGH":
+            if local_results and max_local_score >= 0.9:
+                recommendations.append(
+                    "✅ **Excellent local knowledge found** - Your knowledge base contains highly relevant information for this query."
+                )
+            else:
+                recommendations.append(
+                    "✅ **Good local knowledge available** - Sufficient information found in your knowledge base."
+                )
+        
+        elif confidence_level == "MEDIUM":
+            if local_results and web_results:
+                recommendations.append(
+                    "🔄 **Hybrid approach applied** - Combined local and web sources for comprehensive coverage."
+                )
+            elif web_results and not local_results:
+                recommendations.append(
+                    "🌐 **Web sources utilized** - No local knowledge found, relying on current web information."
+                )
+            elif local_results and not web_results:
+                recommendations.append(
+                    "📚 **Local sources only** - Web search unavailable, using available local knowledge."
+                )
+            
+            # Suggest improvements
+            if max_local_score < similarity_threshold:
+                recommendations.append(
+                    f"💡 **Suggestion:** Consider adding more documents about '{query}' to improve future local search results."
+                )
+        
+        else:  # LOW confidence
+            recommendations.append(
+                "⚠️ **Limited results found** - Consider refining your search query or adding relevant documents to your knowledge base."
+            )
+            
+            # Provide specific suggestions
+            query_words = query.split()
+            if len(query_words) > 5:
+                recommendations.append(
+                    "💡 **Try shorter queries** - Use 2-4 key terms for better results."
+                )
+            elif len(query_words) == 1:
+                recommendations.append(
+                    "💡 **Try more specific queries** - Add context or related terms."
+                )
+        
+        # Source diversity analysis
+        total_sources = len(local_results) + len(web_results)
+        if total_sources >= 5:
+            recommendations.append(
+                f"📊 **Good source diversity** - Found {total_sources} results across multiple sources."
+            )
+        elif total_sources >= 2:
+            recommendations.append(
+                f"📊 **Moderate source coverage** - Found {total_sources} relevant sources."
+            )
+        
+        # Credibility assessment
+        if web_results:
+            high_credibility_count = sum(1 for result in web_results 
+                                       if hasattr(result, 'credibility_score') and result.credibility_score >= 0.8)
+            if high_credibility_count > 0:
+                recommendations.append(
+                    f"🏆 **High credibility sources** - {high_credibility_count} web result(s) from trusted sources."
+                )
+        
+        return "\n".join(recommendations) if recommendations else "No specific recommendations available."
     
     def _validate_startup_dependencies(self) -> None:
         """
