@@ -2,7 +2,7 @@ name: Build and Test
 
 on:
   push:
-    branches: [ main, develop, deploy ]
+    branches: [ "**" ]  # All branches
   pull_request:
     branches: [ main, develop ]
 
@@ -10,7 +10,7 @@ env:
   PYTHON_VERSION: "3.12"
 
 jobs:
-  # Job 1: Build and Test
+  # Job 1: Build and Test (runs on ALL branches)
   build-test:
     name: Build & Test
     runs-on: ubuntu-latest
@@ -35,7 +35,7 @@ jobs:
         python -c "import src.vector_store; print('✅ Vector store imports successfully')"
         python -c "import src.web_search; print('✅ Web search imports successfully')"
 
-  # Job 2: Docker Build and Test
+  # Job 2: Docker Build and Test (runs on ALL branches - no push)
   docker-build:
     name: Docker Build & Test
     runs-on: ubuntu-latest
@@ -47,7 +47,7 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: Build Docker image
+    - name: Build Docker image (no push)
       uses: docker/build-push-action@v5
       with:
         context: .
@@ -56,11 +56,11 @@ jobs:
         cache-from: type=gha
         cache-to: type=gha,mode=max
 
-    - name: Test Docker image
+    - name: Test Docker image functionality
       run: |
         docker run --rm ragmcp/rag-mcp-server:test python -c "import src.mcp_server; print('✅ Docker image works')"
 
-  # Job 3: Deploy (only on deploy branch)
+  # Job 3: Deploy (ONLY on deploy branch - with push)
   deploy:
     name: Deploy Release
     runs-on: ubuntu-latest
@@ -77,7 +77,7 @@ jobs:
       with:
         python-version: ${{ env.PYTHON_VERSION }}
 
-    - name: Install dependencies and build
+    - name: Install dependencies and build package
       run: |
         python -m pip install --upgrade pip
         pip install build wheel setuptools
@@ -86,13 +86,13 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: Login to Docker Hub
+    - name: Login to Docker Hub (deploy branch only)
       uses: docker/login-action@v3
       with:
         username: ${{ secrets.DOCKER_USERNAME }}
         password: ${{ secrets.DOCKER_PASSWORD }}
 
-    - name: Build and push Docker image
+    - name: Build and push Docker image (deploy branch only)
       uses: docker/build-push-action@v5
       with:
         context: .
@@ -104,7 +104,7 @@ jobs:
         cache-from: type=gha
         cache-to: type=gha,mode=max
 
-    - name: Publish to PyPI
+    - name: Publish to PyPI (deploy branch only)
       env:
         TWINE_USERNAME: __token__
         TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
