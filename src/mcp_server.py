@@ -15,16 +15,62 @@ import asyncio
 import signal
 import sys
 import logging
-from typing import Any, Dict, List, Optional
+import time
+import uuid
+import json
+from typing import Any, Dict, List, Optional, Union
 from contextlib import asynccontextmanager
+from collections import defaultdict, deque
+from datetime import datetime, timedelta
 
 # MCP imports
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+from mcp.types import Tool, TextContent, CallToolResult
+
+# JSON Schema validation
+try:
+    import jsonschema
+    from jsonschema import validate, ValidationError
+    JSONSCHEMA_AVAILABLE = True
+except ImportError:
+    JSONSCHEMA_AVAILABLE = False
+    ValidationError = Exception
 
 # Local imports
 from config import config, ConfigurationError
+
+
+class RateLimiter:
+    """Simple token bucket rate limiter."""
+    
+    def __init__(self, max_requests: int = 100, time_window: int = 60):
+        self.max_requests = max_requests
+        self.time_window = time_window
+        self.requests = deque()
+    
+    def is_allowed(self) -> bool:
+        """Check if request is allowed under rate limit."""
+        now = time.time()
+        
+        # Remove old requests outside time window
+        while self.requests and self.requests[0] <= now - self.time_window:
+            self.requests.popleft()
+        
+        # Check if under limit
+        if len(self.requests) < self.max_requests:
+            self.requests.append(now)
+            return True
+        
+        return False
+    
+    def time_until_allowed(self) -> float:
+        """Get seconds until next request is allowed."""
+        if not self.requests:
+            return 0.0
+        
+        oldest_request = self.requests[0]
+        return max(0.0, self.time_window - (time.time() - oldest_request))
 
 
 class RAGMCPServer:
@@ -41,6 +87,24 @@ class RAGMCPServer:
         self.logger = self._setup_logging()
         self._setup_signal_handlers()
         self._register_handlers()
+        
+        # Rate limiting (100 requests per minute by default)
+        self.rate_limiter = RateLimiter(
+            max_requests=config.MAX_RETRIES * 20,  # Scale with config
+            time_window=60
+        )
+        
+        # Performance metrics
+        self.metrics = {
+            'total_requests': 0,
+            'successful_requests': 0,
+            'failed_requests': 0,
+            'average_response_time': 0.0,
+            'tool_usage': defaultdict(int)
+        }
+        
+        # Cache tool schemas for validation
+        self._tool_schemas = {}
         
     def _setup_logging(self) -> logging.Logger:
         """Configure comprehensive logging."""
@@ -71,6 +135,59 @@ class RAGMCPServer:
         """Register MCP server handlers."""
         self.server.list_tools()(self._list_tools)
         self.server.call_tool()(self._call_tool)
+    
+    def _generate_request_id(self) -> str:
+        """Generate unique request ID for tracing."""
+        return f"req_{uuid.uuid4().hex[:8]}"
+    
+    async def _validate_tool_arguments(self, tool_name: str, arguments: Dict[str, Any]) -> None:
+        """
+        Validate tool arguments against JSON Schema.
+        
+        Args:
+            tool_name: Name of the tool being called
+            arguments: Arguments provided for the tool
+            
+        Raises:
+            ValueError: If arguments are invalid
+        """
+        if not JSONSCHEMA_AVAILABLE:
+            self.logger.warning("jsonschema not available, skipping validation")
+            return
+        
+        # Get tool schema from cached tools
+        if tool_name not in self._tool_schemas:
+            # Cache schemas on first use
+            tools = await self._list_tools()
+            for tool in tools:
+                self._tool_schemas[tool.name] = tool.inputSchema
+        
+        if tool_name not in self._tool_schemas:
+            raise ValueError(f"Unknown tool: {tool_name}")
+        
+        schema = self._tool_schemas[tool_name]
+        
+        try:
+            validate(instance=arguments, schema=schema)
+        except ValidationError as e:
+            raise ValueError(f"Invalid arguments for tool '{tool_name}': {e.message}")
+    
+    def _update_metrics(self, tool_name: str, execution_time: float, success: bool) -> None:
+        """Update performance metrics."""
+        self.metrics['total_requests'] += 1
+        self.metrics['tool_usage'][tool_name] += 1
+        
+        if success:
+            self.metrics['successful_requests'] += 1
+        else:
+            self.metrics['failed_requests'] += 1
+        
+        # Update rolling average response time
+        total_requests = self.metrics['total_requests']
+        current_avg = self.metrics['average_response_time']
+        self.metrics['average_response_time'] = (
+            (current_avg * (total_requests - 1) + execution_time) / total_requests
+        )
     
     async def _list_tools(self) -> List[Tool]:
         """
@@ -239,38 +356,107 @@ class RAGMCPServer:
             )
         ]
     
-    async def _call_tool(self, name: str, arguments: Dict[str, Any]) -> List[TextContent]:
+    async def _call_tool(self, name: str, arguments: Dict[str, Any]) -> CallToolResult:
         """
-        Handle tool execution calls.
+        Comprehensive tool execution handler with validation, rate limiting,
+        timeout control, and performance monitoring.
         
         Args:
             name: The name of the tool to execute
             arguments: Arguments provided for the tool
             
         Returns:
-            List of TextContent responses from the tool execution
+            CallToolResult with TextContent response
         """
-        self.logger.info(f"Executing tool: {name} with arguments: {arguments}")
+        # Generate unique request ID for tracing
+        request_id = self._generate_request_id()
+        start_time = time.time()
+        
+        # Initial logging
+        self.logger.info(f"[{request_id}] Executing tool: {name} with arguments: {arguments}")
         
         try:
-            if name == "search_knowledge_base":
-                return await self._search_knowledge_base(**arguments)
-            elif name == "web_search":
-                return await self._search_web(**arguments)
-            elif name == "smart_search":
-                return await self._smart_search(**arguments)
-            else:
-                error_msg = f"Unknown tool: {name}"
-                self.logger.error(error_msg)
-                return [TextContent(type="text", text=f"Error: {error_msg}")]
+            # Rate limiting check
+            if not self.rate_limiter.is_allowed():
+                wait_time = self.rate_limiter.time_until_allowed()
+                error_msg = f"Rate limit exceeded. Try again in {wait_time:.1f} seconds"
+                self.logger.warning(f"[{request_id}] {error_msg}")
+                self._update_metrics(name, time.time() - start_time, False)
+                return CallToolResult(
+                    content=[TextContent(type="text", text=f"Error: {error_msg}")]
+                )
+            
+            # Validate input arguments against JSON Schema
+            try:
+                await self._validate_tool_arguments(name, arguments)
+                self.logger.debug(f"[{request_id}] Arguments validation passed")
+            except ValueError as e:
+                error_msg = f"Validation error: {str(e)}"
+                self.logger.error(f"[{request_id}] {error_msg}")
+                self._update_metrics(name, time.time() - start_time, False)
+                return CallToolResult(
+                    content=[TextContent(type="text", text=f"Error: {error_msg}")]
+                )
+            
+            # Execute tool with timeout control
+            timeout_seconds = config.TIMEOUT_SECONDS
+            self.logger.debug(f"[{request_id}] Starting tool execution with {timeout_seconds}s timeout")
+            
+            try:
+                async with asyncio.timeout(timeout_seconds):
+                    # Pattern match on tool name to dispatch to appropriate handler
+                    if name == "search_knowledge_base":
+                        result = await self._search_knowledge_base_internal(request_id, **arguments)
+                    elif name == "web_search":
+                        result = await self._search_web_internal(request_id, **arguments)
+                    elif name == "smart_search":
+                        result = await self._smart_search_internal(request_id, **arguments)
+                    else:
+                        error_msg = f"Unknown tool: {name}"
+                        self.logger.error(f"[{request_id}] {error_msg}")
+                        self._update_metrics(name, time.time() - start_time, False)
+                        return CallToolResult(
+                            content=[TextContent(type="text", text=f"Error: {error_msg}")]
+                        )
+                
+                # Success - log performance metrics
+                execution_time = time.time() - start_time
+                self.logger.info(
+                    f"[{request_id}] Tool '{name}' completed successfully in {execution_time:.3f}s"
+                )
+                self._update_metrics(name, execution_time, True)
+                
+                # Convert result to CallToolResult format
+                if isinstance(result, list):
+                    # Assume it's already List[TextContent]
+                    return CallToolResult(content=result)
+                elif isinstance(result, str):
+                    return CallToolResult(content=[TextContent(type="text", text=result)])
+                else:
+                    return CallToolResult(content=[TextContent(type="text", text=str(result))])
+                    
+            except asyncio.TimeoutError:
+                execution_time = time.time() - start_time
+                error_msg = f"Tool execution timed out after {timeout_seconds}s"
+                self.logger.error(f"[{request_id}] {error_msg}")
+                self._update_metrics(name, execution_time, False)
+                return CallToolResult(
+                    content=[TextContent(type="text", text=f"Error: {error_msg}")]
+                )
                 
         except Exception as e:
-            error_msg = f"Error executing tool {name}: {str(e)}"
-            self.logger.error(error_msg, exc_info=True)
-            return [TextContent(type="text", text=f"Error: {error_msg}")]
+            # Catch-all error handling with detailed logging
+            execution_time = time.time() - start_time
+            error_msg = f"Unexpected error executing tool {name}: {str(e)}"
+            self.logger.error(f"[{request_id}] {error_msg}", exc_info=True)
+            self._update_metrics(name, execution_time, False)
+            return CallToolResult(
+                content=[TextContent(type="text", text=f"Error: {error_msg}")]
+            )
     
-    async def _search_knowledge_base(
+    async def _search_knowledge_base_internal(
         self,
+        request_id: str,
         query: str,
         max_results: int = 10,
         similarity_threshold: Optional[float] = None,
@@ -280,6 +466,7 @@ class RAGMCPServer:
         Search the local vector knowledge base.
         
         Args:
+            request_id: Unique request identifier for logging
             query: Search query string
             max_results: Maximum number of results to return
             similarity_threshold: Minimum similarity score threshold
@@ -288,7 +475,7 @@ class RAGMCPServer:
         Returns:
             List of TextContent with search results
         """
-        self.logger.debug(f"Searching knowledge base for: {query}")
+        self.logger.debug(f"[{request_id}] Searching knowledge base for: {query}")
         
         # Use config threshold if not provided
         threshold = similarity_threshold or config.SIMILARITY_THRESHOLD
@@ -313,8 +500,9 @@ class RAGMCPServer:
         
         return [TextContent(type="text", text=response_text)]
     
-    async def _search_web(
+    async def _search_web_internal(
         self,
+        request_id: str,
         query: str,
         max_results: int = 5,
         search_depth: str = "basic",
@@ -326,6 +514,7 @@ class RAGMCPServer:
         Search the web using Tavily API.
         
         Args:
+            request_id: Unique request identifier for logging
             query: Search query string
             max_results: Maximum number of results
             search_depth: Search depth (basic/advanced)
@@ -336,7 +525,7 @@ class RAGMCPServer:
         Returns:
             List of TextContent with web search results
         """
-        self.logger.debug(f"Searching web for: {query}")
+        self.logger.debug(f"[{request_id}] Searching web for: {query}")
         exclude_domains = exclude_domains or []
         
         # TODO: Implement actual Tavily API integration
@@ -359,8 +548,9 @@ class RAGMCPServer:
         
         return [TextContent(type="text", text=response_text)]
     
-    async def _smart_search(
+    async def _smart_search_internal(
         self,
+        request_id: str,
         query: str,
         local_max_results: int = 5,
         web_max_results: int = 3,
@@ -373,6 +563,7 @@ class RAGMCPServer:
         Perform intelligent hybrid search combining local and web results.
         
         Args:
+            request_id: Unique request identifier for logging
             query: Search query string
             local_max_results: Max local results
             web_max_results: Max web results  
@@ -384,10 +575,11 @@ class RAGMCPServer:
         Returns:
             List of TextContent with combined search results
         """
-        self.logger.debug(f"Performing smart search for: {query}")
+        self.logger.debug(f"[{request_id}] Performing smart search for: {query}")
         
         # First, search local knowledge base
-        local_results = await self._search_knowledge_base(
+        local_results = await self._search_knowledge_base_internal(
+            request_id=request_id,
             query=query,
             max_results=local_max_results,
             similarity_threshold=local_threshold,
@@ -403,7 +595,8 @@ class RAGMCPServer:
         response_text += local_results[0].text + "\n"
         
         if need_web_search and web_max_results > 0:
-            web_results = await self._search_web(
+            web_results = await self._search_web_internal(
+                request_id=request_id,
                 query=query,
                 max_results=web_max_results,
                 include_answer=True
