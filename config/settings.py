@@ -19,10 +19,10 @@ Config Schema:
     TIMEOUT_SECONDS (int): Request timeout in seconds
 """
 
-import os
-from typing import Optional, Literal
-from pathlib import Path
 import logging
+import os
+from pathlib import Path
+from typing import Optional, Literal
 
 try:
     from dotenv import load_dotenv
@@ -42,22 +42,22 @@ class Config:
     Loads configuration from environment variables and provides validation
     with descriptive error messages for missing or invalid values.
     """
-    
+
     _instance: Optional['Config'] = None
     _initialized: bool = False
-    
+
     def __new__(cls) -> 'Config':
         """Implement singleton pattern."""
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
-    
+
     def __init__(self) -> None:
         """Initialize configuration if not already done."""
         if not self._initialized:
             self._load_environment()
             self._initialized = True
-    
+
     def _load_environment(self) -> None:
         """Load environment variables from .env file if available."""
         if load_dotenv is not None:
@@ -66,25 +66,26 @@ class Config:
             if env_path.exists():
                 load_dotenv(env_path)
         else:
-            logging.warning("python-dotenv not installed. Environment variables will only be loaded from system environment.")
-    
+            logging.warning(
+                "python-dotenv not installed. Environment variables will only be loaded from system environment.")
+
     @property
     def VECTOR_STORE_PATH(self) -> str:
         """Path to the vector store database."""
         return os.getenv('VECTOR_STORE_PATH', './data/vector_store.db')
-    
+
     @property
     def TAVILY_API_KEY(self) -> str:
         """API key for Tavily service."""
         value = os.getenv('TAVILY_API_KEY', '')
         return value
-    
+
     @property
     def OPENAI_API_KEY(self) -> str:
         """API key for OpenAI service."""
         value = os.getenv('OPENAI_API_KEY', '')
         return value
-    
+
     @property
     def SIMILARITY_THRESHOLD(self) -> float:
         """Threshold for similarity matching (0.0-1.0)."""
@@ -95,7 +96,7 @@ class Config:
             return value
         except ValueError as e:
             raise ConfigurationError(f"Invalid SIMILARITY_THRESHOLD: {e}")
-    
+
     @property
     def ENVIRONMENT(self) -> Literal['dev', 'test', 'prod']:
         """Application environment."""
@@ -103,7 +104,7 @@ class Config:
         if env not in ('dev', 'test', 'prod'):
             raise ConfigurationError(f"ENVIRONMENT must be one of 'dev', 'test', 'prod', got '{env}'")
         return env  # type: ignore
-    
+
     @property
     def LOG_LEVEL(self) -> str:
         """Logging level."""
@@ -112,7 +113,7 @@ class Config:
         if level not in valid_levels:
             raise ConfigurationError(f"LOG_LEVEL must be one of {valid_levels}, got '{level}'")
         return level
-    
+
     @property
     def MAX_RETRIES(self) -> int:
         """Maximum number of retry attempts."""
@@ -123,7 +124,7 @@ class Config:
             return value
         except ValueError as e:
             raise ConfigurationError(f"Invalid MAX_RETRIES: {e}")
-    
+
     @property
     def TIMEOUT_SECONDS(self) -> int:
         """Request timeout in seconds."""
@@ -134,7 +135,7 @@ class Config:
             return value
         except ValueError as e:
             raise ConfigurationError(f"Invalid TIMEOUT_SECONDS: {e}")
-    
+
     def validate(self) -> None:
         """
         Validate all required configuration values.
@@ -143,17 +144,17 @@ class Config:
             ConfigurationError: If any required configuration is missing or invalid.
         """
         errors = []
-        
+
         # Check required string fields
         required_fields = {
             'TAVILY_API_KEY': self.TAVILY_API_KEY,
             'OPENAI_API_KEY': self.OPENAI_API_KEY,
         }
-        
+
         for field_name, field_value in required_fields.items():
             if not field_value or field_value.strip() == '':
                 errors.append(f"{field_name} is required but not set or empty")
-        
+
         # Validate vector store path
         vector_path = Path(self.VECTOR_STORE_PATH)
         vector_dir = vector_path.parent
@@ -162,50 +163,50 @@ class Config:
                 vector_dir.mkdir(parents=True, exist_ok=True)
             except (OSError, PermissionError) as e:
                 errors.append(f"Cannot create directory for VECTOR_STORE_PATH '{vector_path}': {e}")
-        
+
         # Validate numeric fields (will raise ConfigurationError if invalid)
         try:
             self.SIMILARITY_THRESHOLD
         except ConfigurationError as e:
             errors.append(str(e))
-        
+
         try:
             self.MAX_RETRIES
         except ConfigurationError as e:
             errors.append(str(e))
-        
+
         try:
             self.TIMEOUT_SECONDS
         except ConfigurationError as e:
             errors.append(str(e))
-        
+
         # Validate environment and log level
         try:
             self.ENVIRONMENT
         except ConfigurationError as e:
             errors.append(str(e))
-        
+
         try:
             self.LOG_LEVEL
         except ConfigurationError as e:
             errors.append(str(e))
-        
+
         if errors:
             error_msg = "Configuration validation failed:\n" + "\n".join(f"  - {error}" for error in errors)
             raise ConfigurationError(error_msg)
-    
+
     def is_development(self) -> bool:
         """Check if running in development environment."""
         return self.ENVIRONMENT == 'dev'
-    
+
     def is_test(self) -> bool:
         """Check if running in test environment."""
         return self.ENVIRONMENT == 'test'
-    
+
     def is_production(self) -> bool:
         """Check if running in production environment."""
         return self.ENVIRONMENT == 'prod'
-    
+
     def to_dict(self) -> dict:
         """
         Convert configuration to dictionary for debugging.
@@ -222,7 +223,7 @@ class Config:
             'MAX_RETRIES': self.MAX_RETRIES,
             'TIMEOUT_SECONDS': self.TIMEOUT_SECONDS,
         }
-    
+
     def __repr__(self) -> str:
         """String representation of configuration."""
         config_dict = self.to_dict()

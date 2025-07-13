@@ -12,7 +12,6 @@ and startup validation for all dependencies and configurations.
 """
 
 import asyncio
-import json
 import logging
 import re
 import signal
@@ -20,10 +19,9 @@ import sys
 import time
 import uuid
 from collections import defaultdict, deque
-from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 # MCP imports
 from mcp.server import Server
@@ -42,10 +40,8 @@ except ImportError:
 
 # Local imports
 from config.settings import ConfigurationError, config
-from vector_store import Document, SearchResult, VectorStoreError, VectorStoreManager
-from web_search import (
-    QuotaExceededError,
-    RateLimitError,
+from .vector_store import SearchResult, VectorStoreError, VectorStoreManager
+from .web_search import (
     WebSearchError,
     WebSearchManager,
     WebSearchResult,
@@ -158,7 +154,7 @@ class RAGMCPServer:
         return f"req_{uuid.uuid4().hex[:8]}"
 
     async def _validate_tool_arguments(
-        self, tool_name: str, arguments: Dict[str, Any]
+            self, tool_name: str, arguments: Dict[str, Any]
     ) -> None:
         """
         Validate tool arguments against JSON Schema.
@@ -192,7 +188,7 @@ class RAGMCPServer:
             raise ValueError(f"Invalid arguments for tool '{tool_name}': {e.message}")
 
     def _update_metrics(
-        self, tool_name: str, execution_time: float, success: bool
+            self, tool_name: str, execution_time: float, success: bool
     ) -> None:
         """Update performance metrics."""
         self.metrics["total_requests"] += 1
@@ -207,8 +203,8 @@ class RAGMCPServer:
         total_requests = self.metrics["total_requests"]
         current_avg = self.metrics["average_response_time"]
         self.metrics["average_response_time"] = (
-            current_avg * (total_requests - 1) + execution_time
-        ) / total_requests
+                                                        current_avg * (total_requests - 1) + execution_time
+                                                ) / total_requests
 
     async def _list_tools(self) -> List[Tool]:
         """
@@ -613,8 +609,8 @@ class RAGMCPServer:
         if other_fields:
             formatted_lines.append("📋 Additional:")
             for key, value in list(other_fields.items())[
-                :3
-            ]:  # Limit to 3 additional fields
+                              :3
+                              ]:  # Limit to 3 additional fields
                 if isinstance(value, (str, int, float, bool)):
                     value_str = str(value)
                     if len(value_str) > 30:
@@ -624,7 +620,7 @@ class RAGMCPServer:
         return "\n".join(formatted_lines)
 
     def _highlight_content(
-        self, content: str, keywords: List[str], max_length: int = 500
+            self, content: str, keywords: List[str], max_length: int = 500
     ) -> str:
         """
         Highlight search keywords in content and truncate if necessary.
@@ -730,7 +726,7 @@ class RAGMCPServer:
                                     )
                                 ).timestamp()
                             elif isinstance(
-                                result.document.metadata[field], (int, float)
+                                    result.document.metadata[field], (int, float)
                             ):
                                 timestamp = float(result.document.metadata[field])
                             break
@@ -742,12 +738,12 @@ class RAGMCPServer:
         return sorted(results, key=sort_key)
 
     async def _search_knowledge_base(
-        self,
-        request_id: str,
-        query: str,
-        top_k: int = 5,
-        filter_dict: Optional[Dict[str, Any]] = None,
-        include_metadata: bool = True,
+            self,
+            request_id: str,
+            query: str,
+            top_k: int = 5,
+            filter_dict: Optional[Dict[str, Any]] = None,
+            include_metadata: bool = True,
     ) -> List[TextContent]:
         """
         Search the local vector knowledge base.
@@ -902,14 +898,14 @@ class RAGMCPServer:
             return [TextContent(type="text", text=error_msg)]
 
     async def _search_web(
-        self,
-        request_id: str,
-        query: str,
-        max_results: int = 5,
-        search_depth: str = "basic",
-        include_answer: bool = True,
-        include_raw_content: bool = False,
-        exclude_domains: Optional[List[str]] = None,
+            self,
+            request_id: str,
+            query: str,
+            max_results: int = 5,
+            search_depth: str = "basic",
+            include_answer: bool = True,
+            include_raw_content: bool = False,
+            exclude_domains: Optional[List[str]] = None,
     ) -> List[TextContent]:
         """
         Search the web using Tavily API.
@@ -1110,15 +1106,15 @@ class RAGMCPServer:
             return [TextContent(type="text", text=error_msg)]
 
     async def _smart_search_internal(
-        self,
-        request_id: str,
-        query: str,
-        similarity_threshold: float = 0.75,
-        local_top_k: int = 5,
-        web_max_results: int = 5,
-        include_sources: bool = True,
-        combine_strategy: str = "relevance_score",
-        min_local_results: int = 2,
+            self,
+            request_id: str,
+            query: str,
+            similarity_threshold: float = 0.75,
+            local_top_k: int = 5,
+            web_max_results: int = 5,
+            include_sources: bool = True,
+            combine_strategy: str = "relevance_score",
+            min_local_results: int = 2,
     ) -> List[TextContent]:
         """
         Perform sophisticated intelligent hybrid search with advanced decision logic.
@@ -1259,7 +1255,7 @@ class RAGMCPServer:
                 )
 
                 for i, result in enumerate(
-                    local_raw_results[:3], 1
+                        local_raw_results[:3], 1
                 ):  # Show top 3 local results
                     relevance_explanation = self._generate_relevance_explanation(
                         result, query, "local"
@@ -1301,7 +1297,7 @@ class RAGMCPServer:
                     )
 
                     for i, result in enumerate(
-                        web_raw_results[:3], 1
+                            web_raw_results[:3], 1
                     ):  # Show top 3 web results
                         relevance_explanation = self._generate_relevance_explanation(
                             result, query, "web"
@@ -1382,7 +1378,7 @@ class RAGMCPServer:
             return [TextContent(type="text", text=error_msg)]
 
     def _deduplicate_results(
-        self, local_results: List[SearchResult], web_results: List[WebSearchResult]
+            self, local_results: List[SearchResult], web_results: List[WebSearchResult]
     ) -> Dict[str, List]:
         """
         Perform cross-source result deduplication using content similarity and URL matching.
@@ -1450,7 +1446,7 @@ class RAGMCPServer:
         }
 
     def _assess_result_credibility(
-        self, results_dict: Dict[str, List], query: str
+            self, results_dict: Dict[str, List], query: str
     ) -> Dict[str, List]:
         """
         Assess source credibility and enhance results with credibility scores.
@@ -1505,29 +1501,29 @@ class RAGMCPServer:
 
             # High credibility domains
             if any(
-                trusted in domain
-                for trusted in [
-                    "edu",
-                    "gov",
-                    "org",
-                    "wikipedia",
-                    "reuters",
-                    "bbc",
-                    "nature",
-                    "science",
-                    "ieee",
-                    "acm",
-                    "arxiv",
-                    "pubmed",
-                ]
+                    trusted in domain
+                    for trusted in [
+                        "edu",
+                        "gov",
+                        "org",
+                        "wikipedia",
+                        "reuters",
+                        "bbc",
+                        "nature",
+                        "science",
+                        "ieee",
+                        "acm",
+                        "arxiv",
+                        "pubmed",
+                    ]
             ):
                 score += 0.3
                 factors.append("Trusted domain")
 
             # Medium credibility domains
             elif any(
-                medium in domain
-                for medium in ["com", "net", "co.", "news", "tech", "research"]
+                    medium in domain
+                    for medium in ["com", "net", "co.", "news", "tech", "research"]
             ):
                 score += 0.1
                 factors.append("Established domain")
@@ -1571,7 +1567,7 @@ class RAGMCPServer:
         return min(1.0, score)  # Cap at 1.0
 
     def _generate_relevance_explanation(
-        self, result, query: str, source_type: str
+            self, result, query: str, source_type: str
     ) -> str:
         """
         Generate explanation for why a result is relevant to the query.
@@ -1625,13 +1621,13 @@ class RAGMCPServer:
         return "Relevance detected through content analysis"
 
     def _generate_smart_recommendations(
-        self,
-        local_results: List,
-        web_results: List,
-        max_local_score: float,
-        similarity_threshold: float,
-        confidence_level: str,
-        query: str,
+            self,
+            local_results: List,
+            web_results: List,
+            max_local_score: float,
+            similarity_threshold: float,
+            confidence_level: str,
+            query: str,
     ) -> str:
         """
         Generate intelligent recommendations based on search results analysis.

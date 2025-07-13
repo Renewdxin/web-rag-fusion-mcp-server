@@ -26,12 +26,11 @@ import pickle
 import re
 import tempfile
 import time
-from abc import ABC, abstractmethod
-from collections import OrderedDict, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 # HTTP client imports
 try:
@@ -284,13 +283,13 @@ class QueryOptimizer:
         if len(filtered_words) >= 2:
             # 2-word phrases
             for i in range(len(filtered_words) - 1):
-                phrase = f"{filtered_words[i]} {filtered_words[i+1]}"
+                phrase = f"{filtered_words[i]} {filtered_words[i + 1]}"
                 key_phrases.append(phrase)
 
             # 3-word phrases
             if len(filtered_words) >= 3:
                 for i in range(len(filtered_words) - 2):
-                    phrase = f"{filtered_words[i]} {filtered_words[i+1]} {filtered_words[i+2]}"
+                    phrase = f"{filtered_words[i]} {filtered_words[i + 1]} {filtered_words[i + 2]}"
                     key_phrases.append(phrase)
 
         # Build optimized query
@@ -360,7 +359,7 @@ class ContentFilter:
         ]
 
     def filter_content(
-        self, content: str, title: str = "", url: str = ""
+            self, content: str, title: str = "", url: str = ""
     ) -> Dict[str, Any]:
         """
         Filter and clean content.
@@ -429,13 +428,13 @@ class ContentFilter:
 
         # Combine scores
         total_indicators = (
-            ad_matches + title_ad_matches * 2
+                ad_matches + title_ad_matches * 2
         )  # Weight title more heavily
 
         return total_indicators >= 2
 
     def _calculate_quality_score(
-        self, content: str, original_length: int, is_ad: bool
+            self, content: str, original_length: int, is_ad: bool
     ) -> float:
         """Calculate content quality score (0.0 to 1.0)."""
         if not content or is_ad:
@@ -551,7 +550,7 @@ class SearchCache:
     """Result caching with TTL and size management."""
 
     def __init__(
-        self, cache_dir: Optional[Path] = None, ttl_hours: int = 1, max_size: int = 1000
+            self, cache_dir: Optional[Path] = None, ttl_hours: int = 1, max_size: int = 1000
     ):
         self.cache_dir = cache_dir or Path(tempfile.gettempdir()) / "web_search_cache"
         self.ttl_hours = ttl_hours
@@ -576,25 +575,44 @@ class SearchCache:
             async with aiosqlite.connect(self.cache_db_path) as db:
                 await db.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS search_cache (
-                        query_hash TEXT PRIMARY KEY,
-                        query_text TEXT NOT NULL,
-                        results BLOB NOT NULL,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        access_count INTEGER DEFAULT 1,
-                        last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    CREATE TABLE IF NOT EXISTS search_cache
+                    (
+                        query_hash
+                        TEXT
+                        PRIMARY
+                        KEY,
+                        query_text
+                        TEXT
+                        NOT
+                        NULL,
+                        results
+                        BLOB
+                        NOT
+                        NULL,
+                        created_at
+                        TIMESTAMP
+                        DEFAULT
+                        CURRENT_TIMESTAMP,
+                        access_count
+                        INTEGER
+                        DEFAULT
+                        1,
+                        last_accessed
+                        TIMESTAMP
+                        DEFAULT
+                        CURRENT_TIMESTAMP
                     )
-                """
+                    """
                 )
                 await db.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_created_at ON search_cache(created_at)
-                """
+                    """
                 )
                 await db.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_last_accessed ON search_cache(last_accessed)
-                """
+                    """
                 )
                 await db.commit()
 
@@ -636,9 +654,11 @@ class SearchCache:
 
                 cursor = await db.execute(
                     """
-                    SELECT results FROM search_cache 
-                    WHERE query_hash = ? AND created_at > ?
-                """,
+                    SELECT results
+                    FROM search_cache
+                    WHERE query_hash = ?
+                      AND created_at > ?
+                    """,
                     (cache_key, cutoff_time.isoformat()),
                 )
 
@@ -648,10 +668,11 @@ class SearchCache:
                     # Update access statistics
                     await db.execute(
                         """
-                        UPDATE search_cache 
-                        SET access_count = access_count + 1, last_accessed = CURRENT_TIMESTAMP 
+                        UPDATE search_cache
+                        SET access_count  = access_count + 1,
+                            last_accessed = CURRENT_TIMESTAMP
                         WHERE query_hash = ?
-                    """,
+                        """,
                         (cache_key,),
                     )
                     await db.commit()
@@ -713,8 +734,10 @@ class SearchCache:
             async with aiosqlite.connect(self.cache_db_path) as db:
                 cursor = await db.execute(
                     """
-                    DELETE FROM search_cache WHERE created_at < ?
-                """,
+                    DELETE
+                    FROM search_cache
+                    WHERE created_at < ?
+                    """,
                     (cutoff_time.isoformat(),),
                 )
 
@@ -741,13 +764,14 @@ class SearchCache:
                 entries_to_remove = count - self.max_size
                 await db.execute(
                     """
-                    DELETE FROM search_cache 
-                    WHERE query_hash IN (
-                        SELECT query_hash FROM search_cache 
-                        ORDER BY last_accessed ASC 
+                    DELETE
+                    FROM search_cache
+                    WHERE query_hash IN (SELECT query_hash
+                                         FROM search_cache
+                                         ORDER BY last_accessed ASC
                         LIMIT ?
-                    )
-                """,
+                        )
+                    """,
                     (entries_to_remove,),
                 )
 
@@ -774,8 +798,10 @@ class SearchCache:
                 cutoff = datetime.utcnow() - timedelta(hours=24)
                 cursor = await db.execute(
                     """
-                    SELECT COUNT(*) FROM search_cache WHERE created_at > ?
-                """,
+                    SELECT COUNT(*)
+                    FROM search_cache
+                    WHERE created_at > ?
+                    """,
                     (cutoff.isoformat(),),
                 )
                 recent_entries = (await cursor.fetchone())[0]
@@ -783,8 +809,9 @@ class SearchCache:
                 # Cache hit statistics
                 cursor = await db.execute(
                     """
-                    SELECT AVG(access_count), SUM(access_count) FROM search_cache
-                """
+                    SELECT AVG(access_count), SUM(access_count)
+                    FROM search_cache
+                    """
                 )
                 avg_access, total_access = await cursor.fetchone()
 
@@ -821,14 +848,14 @@ class WebSearchManager:
     """
 
     def __init__(
-        self,
-        api_key: str,
-        timeout: int = 30,
-        max_retries: int = 3,
-        cache_ttl_hours: int = 1,
-        cache_max_size: int = 1000,
-        quota_limit: Optional[int] = None,
-        cache_dir: Optional[Path] = None,
+            self,
+            api_key: str,
+            timeout: int = 30,
+            max_retries: int = 3,
+            cache_ttl_hours: int = 1,
+            cache_max_size: int = 1000,
+            quota_limit: Optional[int] = None,
+            cache_dir: Optional[Path] = None,
     ):
         """
         Initialize WebSearchManager.
@@ -881,13 +908,13 @@ class WebSearchManager:
         return self._session
 
     async def search(
-        self,
-        query: str,
-        max_results: int = 5,
-        search_depth: str = "basic",
-        include_answer: bool = True,
-        include_raw_content: bool = False,
-        exclude_domains: Optional[List[str]] = None,
+            self,
+            query: str,
+            max_results: int = 5,
+            search_depth: str = "basic",
+            include_answer: bool = True,
+            include_raw_content: bool = False,
+            exclude_domains: Optional[List[str]] = None,
     ) -> Tuple[List[WebSearchResult], Dict[str, Any]]:
         """
         Perform web search with comprehensive error handling and optimization.
@@ -976,7 +1003,7 @@ class WebSearchManager:
 
             if self.stats.total_requests > 0:
                 self.stats.average_response_time = (
-                    self.stats.total_execution_time / self.stats.total_requests
+                        self.stats.total_execution_time / self.stats.total_requests
                 )
 
             metadata = {
@@ -1012,13 +1039,13 @@ class WebSearchManager:
             return [], metadata
 
     async def _search_with_retry(
-        self,
-        query: str,
-        max_results: int,
-        search_depth: str,
-        include_answer: bool,
-        include_raw_content: bool,
-        exclude_domains: List[str],
+            self,
+            query: str,
+            max_results: int,
+            search_depth: str,
+            include_answer: bool,
+            include_raw_content: bool,
+            exclude_domains: List[str],
     ) -> Dict[str, Any]:
         """Perform API search with exponential backoff retry."""
         session = await self._get_session()
@@ -1046,7 +1073,7 @@ class WebSearchManager:
 
                 # Calculate delay for this attempt
                 if attempt > 0:
-                    delay = min(2**attempt, 60)  # Exponential backoff, max 60 seconds
+                    delay = min(2 ** attempt, 60)  # Exponential backoff, max 60 seconds
                     self.logger.info(
                         f"Retrying search in {delay}s (attempt {attempt + 1})"
                     )
@@ -1055,7 +1082,7 @@ class WebSearchManager:
                 # Make API request
                 api_start_time = time.time()
                 async with session.post(
-                    f"{self.base_url}/search", json=request_data
+                        f"{self.base_url}/search", json=request_data
                 ) as response:
                     api_time = time.time() - api_start_time
 
@@ -1123,7 +1150,7 @@ class WebSearchManager:
             raise WebSearchError("All retry attempts failed")
 
     async def _process_results(
-        self, api_results: Dict[str, Any], query_info: Dict[str, Any]
+            self, api_results: Dict[str, Any], query_info: Dict[str, Any]
     ) -> List[WebSearchResult]:
         """Process and filter API results."""
         if not api_results or "results" not in api_results:
@@ -1196,9 +1223,9 @@ class WebSearchManager:
                 "successful_requests": self.stats.successful_requests,
                 "failed_requests": self.stats.failed_requests,
                 "success_rate": (
-                    self.stats.successful_requests / max(1, self.stats.total_requests)
-                )
-                * 100,
+                                        self.stats.successful_requests / max(1, self.stats.total_requests)
+                                )
+                                * 100,
                 "average_response_time": round(self.stats.average_response_time, 3),
                 "api_calls": self.stats.api_calls,
             },
@@ -1206,10 +1233,10 @@ class WebSearchManager:
                 "cache_hits": self.stats.cache_hits,
                 "cache_misses": self.stats.cache_misses,
                 "hit_rate": (
-                    self.stats.cache_hits
-                    / max(1, self.stats.cache_hits + self.stats.cache_misses)
-                )
-                * 100,
+                                    self.stats.cache_hits
+                                    / max(1, self.stats.cache_hits + self.stats.cache_misses)
+                            )
+                            * 100,
                 **cache_stats,
             },
             "usage_stats": usage_stats,

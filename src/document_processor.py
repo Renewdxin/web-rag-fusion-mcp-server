@@ -20,7 +20,6 @@ Features:
 
 import asyncio
 import hashlib
-import json
 import logging
 import pickle
 import re
@@ -31,7 +30,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple, Union
+from typing import Any, Dict, List, Optional, Protocol, Tuple
 
 # File format libraries (with graceful degradation)
 try:
@@ -80,7 +79,7 @@ except ImportError:
 
 # Local imports
 try:
-    from vector_store import Document
+    from .vector_store import Document
 except ImportError:
     # Fallback Document definition
     @dataclass
@@ -251,7 +250,7 @@ class TextChunker:
     """Intelligent text chunking with sentence boundary detection."""
 
     def __init__(
-        self, chunk_size: int = 1000, overlap: int = 200, min_chunk_size: int = 100
+            self, chunk_size: int = 1000, overlap: int = 200, min_chunk_size: int = 100
     ):
         self.chunk_size = chunk_size
         self.overlap = overlap
@@ -394,7 +393,7 @@ class TextChunker:
 
             # Get overlap text from previous chunk
             overlap_text = (
-                prev_chunk[-self.overlap :]
+                prev_chunk[-self.overlap:]
                 if len(prev_chunk) > self.overlap
                 else prev_chunk
             )
@@ -641,7 +640,7 @@ class TextLoader(DocumentLoader):
         try:
             if ASYNC_IO_AVAILABLE:
                 async with aiofiles.open(
-                    file_path, "r", encoding=encoding, errors="replace"
+                        file_path, "r", encoding=encoding, errors="replace"
                 ) as f:
                     content = await f.read()
             else:
@@ -741,7 +740,7 @@ class HTMLLoader(DocumentLoader):
 
             if ASYNC_IO_AVAILABLE:
                 async with aiofiles.open(
-                    file_path, "r", encoding=encoding, errors="replace"
+                        file_path, "r", encoding=encoding, errors="replace"
                 ) as f:
                     html_content = await f.read()
             else:
@@ -792,7 +791,7 @@ class ProcessingCache:
 
     def __init__(self, cache_dir: Optional[Path] = None):
         self.cache_dir = (
-            cache_dir or Path(tempfile.gettempdir()) / "document_processing_cache"
+                cache_dir or Path(tempfile.gettempdir()) / "document_processing_cache"
         )
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.cache_db_path = self.cache_dir / "processing_cache.db"
@@ -808,29 +807,60 @@ class ProcessingCache:
             async with aiosqlite.connect(self.cache_db_path) as db:
                 await db.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS file_cache (
-                        file_hash TEXT PRIMARY KEY,
-                        file_path TEXT NOT NULL,
-                        file_size INTEGER NOT NULL,
-                        modification_time TEXT NOT NULL,
-                        processed_chunks INTEGER NOT NULL,
-                        processing_time REAL NOT NULL,
-                        cache_data BLOB NOT NULL,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        access_count INTEGER DEFAULT 1,
-                        last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    CREATE TABLE IF NOT EXISTS file_cache
+                    (
+                        file_hash
+                        TEXT
+                        PRIMARY
+                        KEY,
+                        file_path
+                        TEXT
+                        NOT
+                        NULL,
+                        file_size
+                        INTEGER
+                        NOT
+                        NULL,
+                        modification_time
+                        TEXT
+                        NOT
+                        NULL,
+                        processed_chunks
+                        INTEGER
+                        NOT
+                        NULL,
+                        processing_time
+                        REAL
+                        NOT
+                        NULL,
+                        cache_data
+                        BLOB
+                        NOT
+                        NULL,
+                        created_at
+                        TIMESTAMP
+                        DEFAULT
+                        CURRENT_TIMESTAMP,
+                        access_count
+                        INTEGER
+                        DEFAULT
+                        1,
+                        last_accessed
+                        TIMESTAMP
+                        DEFAULT
+                        CURRENT_TIMESTAMP
                     )
-                """
+                    """
                 )
                 await db.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_file_path ON file_cache(file_path)
-                """
+                    """
                 )
                 await db.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_modification_time ON file_cache(modification_time)
-                """
+                    """
                 )
                 await db.commit()
         else:
@@ -840,29 +870,60 @@ class ProcessingCache:
             with sqlite3.connect(self.cache_db_path) as db:
                 db.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS file_cache (
-                        file_hash TEXT PRIMARY KEY,
-                        file_path TEXT NOT NULL,
-                        file_size INTEGER NOT NULL,
-                        modification_time TEXT NOT NULL,
-                        processed_chunks INTEGER NOT NULL,
-                        processing_time REAL NOT NULL,
-                        cache_data BLOB NOT NULL,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        access_count INTEGER DEFAULT 1,
-                        last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    CREATE TABLE IF NOT EXISTS file_cache
+                    (
+                        file_hash
+                        TEXT
+                        PRIMARY
+                        KEY,
+                        file_path
+                        TEXT
+                        NOT
+                        NULL,
+                        file_size
+                        INTEGER
+                        NOT
+                        NULL,
+                        modification_time
+                        TEXT
+                        NOT
+                        NULL,
+                        processed_chunks
+                        INTEGER
+                        NOT
+                        NULL,
+                        processing_time
+                        REAL
+                        NOT
+                        NULL,
+                        cache_data
+                        BLOB
+                        NOT
+                        NULL,
+                        created_at
+                        TIMESTAMP
+                        DEFAULT
+                        CURRENT_TIMESTAMP,
+                        access_count
+                        INTEGER
+                        DEFAULT
+                        1,
+                        last_accessed
+                        TIMESTAMP
+                        DEFAULT
+                        CURRENT_TIMESTAMP
                     )
-                """
+                    """
                 )
                 db.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_file_path ON file_cache(file_path)
-                """
+                    """
                 )
                 db.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_modification_time ON file_cache(modification_time)
-                """
+                    """
                 )
                 db.commit()
 
@@ -870,7 +931,7 @@ class ProcessingCache:
         self.logger.info(f"Processing cache initialized at {self.cache_db_path}")
 
     async def get_cached_result(
-        self, file_path: Path, file_hash: str, modification_time: str
+            self, file_path: Path, file_hash: str, modification_time: str
     ) -> Optional[List[ProcessedDocument]]:
         """Retrieve cached processing result if valid."""
         if not self._initialized:
@@ -924,13 +985,13 @@ class ProcessingCache:
         return None
 
     async def store_result(
-        self,
-        file_path: Path,
-        file_hash: str,
-        file_size: int,
-        modification_time: str,
-        processed_documents: List[ProcessedDocument],
-        processing_time: float,
+            self,
+            file_path: Path,
+            file_hash: str,
+            file_size: int,
+            modification_time: str,
+            processed_documents: List[ProcessedDocument],
+            processing_time: float,
     ) -> None:
         """Store processing result in cache."""
         if not self._initialized:
@@ -1080,12 +1141,12 @@ class DocumentProcessor:
     """
 
     def __init__(
-        self,
-        chunk_size: int = 1000,
-        overlap: int = 200,
-        max_concurrency: int = 5,
-        cache_dir: Optional[Path] = None,
-        custom_tags: Optional[Dict[str, str]] = None,
+            self,
+            chunk_size: int = 1000,
+            overlap: int = 200,
+            max_concurrency: int = 5,
+            cache_dir: Optional[Path] = None,
+            custom_tags: Optional[Dict[str, str]] = None,
     ):
         """
         Initialize DocumentProcessor.
@@ -1167,10 +1228,10 @@ class DocumentProcessor:
         return "\n".join(cleaned_lines)
 
     async def process_file(
-        self,
-        file_path: Path,
-        preserve_paragraphs: bool = True,
-        custom_metadata: Optional[Dict[str, Any]] = None,
+            self,
+            file_path: Path,
+            preserve_paragraphs: bool = True,
+            custom_metadata: Optional[Dict[str, Any]] = None,
     ) -> List[ProcessedDocument]:
         """
         Process single file into chunks with metadata.
@@ -1282,11 +1343,11 @@ class DocumentProcessor:
                 raise DocumentProcessingError(f"Processing failed for {file_path}: {e}")
 
     async def process_files(
-        self,
-        file_paths: List[Path],
-        preserve_paragraphs: bool = True,
-        progress_callback: Optional[ProgressCallback] = None,
-        custom_metadata: Optional[Dict[str, Any]] = None,
+            self,
+            file_paths: List[Path],
+            preserve_paragraphs: bool = True,
+            progress_callback: Optional[ProgressCallback] = None,
+            custom_metadata: Optional[Dict[str, Any]] = None,
     ) -> Tuple[List[ProcessedDocument], ProcessingStats]:
         """
         Process multiple files with batch processing and progress tracking.
@@ -1327,7 +1388,7 @@ class DocumentProcessor:
         semaphore = asyncio.Semaphore(self.max_concurrency)
 
         async def process_single_file(
-            file_path: Path, index: int
+                file_path: Path, index: int
         ) -> Optional[List[ProcessedDocument]]:
             async with semaphore:
                 try:
@@ -1421,12 +1482,12 @@ class DocumentProcessor:
         return final_docs, stats
 
     async def process_directory(
-        self,
-        directory: Path,
-        recursive: bool = True,
-        file_pattern: str = "*",
-        progress_callback: Optional[ProgressCallback] = None,
-        custom_metadata: Optional[Dict[str, Any]] = None,
+            self,
+            directory: Path,
+            recursive: bool = True,
+            file_pattern: str = "*",
+            progress_callback: Optional[ProgressCallback] = None,
+            custom_metadata: Optional[Dict[str, Any]] = None,
     ) -> Tuple[List[ProcessedDocument], ProcessingStats]:
         """
         Process all supported files in a directory.
@@ -1462,7 +1523,7 @@ class DocumentProcessor:
         )
 
     def convert_to_documents(
-        self, processed_docs: List[ProcessedDocument]
+            self, processed_docs: List[ProcessedDocument]
     ) -> List[Document]:
         """Convert ProcessedDocument list to Document list for vector store."""
         documents = []
@@ -1488,10 +1549,10 @@ class DocumentProcessor:
 
 # Convenience functions
 async def process_single_file(
-    file_path: Path,
-    chunk_size: int = 1000,
-    overlap: int = 200,
-    custom_tags: Optional[Dict[str, str]] = None,
+        file_path: Path,
+        chunk_size: int = 1000,
+        overlap: int = 200,
+        custom_tags: Optional[Dict[str, str]] = None,
 ) -> List[Document]:
     """
     Convenience function to process a single file.
@@ -1514,11 +1575,11 @@ async def process_single_file(
 
 
 async def process_directory_simple(
-    directory: Path,
-    chunk_size: int = 1000,
-    overlap: int = 200,
-    recursive: bool = True,
-    progress_callback: Optional[ProgressCallback] = None,
+        directory: Path,
+        chunk_size: int = 1000,
+        overlap: int = 200,
+        recursive: bool = True,
+        progress_callback: Optional[ProgressCallback] = None,
 ) -> Tuple[List[Document], ProcessingStats]:
     """
     Convenience function to process a directory.

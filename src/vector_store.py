@@ -21,8 +21,6 @@ import hashlib
 import json
 import logging
 import pickle
-import shutil
-import sqlite3
 import tempfile
 import time
 import uuid
@@ -30,9 +28,9 @@ from abc import ABC, abstractmethod
 from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple, Union
+from typing import Any, Dict, List, Optional, Protocol, Tuple, Union
 
 # Async file operations
 try:
@@ -203,28 +201,50 @@ class CacheManager:
         async with self._get_connection() as conn:
             await conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS embeddings (
-                    content_hash TEXT PRIMARY KEY,
-                    model TEXT NOT NULL,
-                    embedding BLOB NOT NULL,
-                    dimensions INTEGER NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    access_count INTEGER DEFAULT 1,
-                    last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                CREATE TABLE IF NOT EXISTS embeddings
+                (
+                    content_hash
+                    TEXT
+                    PRIMARY
+                    KEY,
+                    model
+                    TEXT
+                    NOT
+                    NULL,
+                    embedding
+                    BLOB
+                    NOT
+                    NULL,
+                    dimensions
+                    INTEGER
+                    NOT
+                    NULL,
+                    created_at
+                    TIMESTAMP
+                    DEFAULT
+                    CURRENT_TIMESTAMP,
+                    access_count
+                    INTEGER
+                    DEFAULT
+                    1,
+                    last_accessed
+                    TIMESTAMP
+                    DEFAULT
+                    CURRENT_TIMESTAMP
                 )
-            """
+                """
             )
             await conn.execute(
                 """
-                CREATE INDEX IF NOT EXISTS idx_model_hash 
-                ON embeddings(model, content_hash)
-            """
+                CREATE INDEX IF NOT EXISTS idx_model_hash
+                    ON embeddings(model, content_hash)
+                """
             )
             await conn.execute(
                 """
-                CREATE INDEX IF NOT EXISTS idx_created_at 
-                ON embeddings(created_at)
-            """
+                CREATE INDEX IF NOT EXISTS idx_created_at
+                    ON embeddings(created_at)
+                """
             )
             await conn.commit()
 
@@ -244,7 +264,7 @@ class CacheManager:
             await self._connection_pool.put(conn)
 
     async def get_embedding(
-        self, content_hash: str, model: str
+            self, content_hash: str, model: str
     ) -> Optional[List[float]]:
         """Retrieve embedding from cache."""
         try:
@@ -272,7 +292,7 @@ class CacheManager:
         return None
 
     async def store_embedding(
-        self, content_hash: str, model: str, embedding: List[float]
+            self, content_hash: str, model: str, embedding: List[float]
     ) -> None:
         """Store embedding in cache."""
         try:
@@ -317,7 +337,7 @@ class CacheManager:
             return {}
 
     async def clear_cache(
-        self, model: str, older_than_days: Optional[int] = None
+            self, model: str, older_than_days: Optional[int] = None
     ) -> int:
         """Clear cache entries."""
         try:
@@ -388,13 +408,13 @@ class OpenAIEmbeddingFunction(EmbeddingFunction):
     """OpenAI embedding function with async operations and caching."""
 
     def __init__(
-        self,
-        api_key: str,
-        model: str = "text-embedding-3-small",
-        cache_dir: Optional[Path] = None,
-        max_requests_per_minute: int = 3000,
-        max_retries: int = 3,
-        retry_delay: float = 1.0,
+            self,
+            api_key: str,
+            model: str = "text-embedding-3-small",
+            cache_dir: Optional[Path] = None,
+            max_requests_per_minute: int = 3000,
+            max_retries: int = 3,
+            retry_delay: float = 1.0,
     ):
         if not OPENAI_AVAILABLE:
             raise ImportError("OpenAI library required: pip install openai")
@@ -423,7 +443,7 @@ class OpenAIEmbeddingFunction(EmbeddingFunction):
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     async def _create_embeddings_with_retry(
-        self, texts: List[str]
+            self, texts: List[str]
     ) -> List[List[float]]:
         """Create embeddings with retry logic."""
         for attempt in range(self.max_retries + 1):
@@ -445,7 +465,7 @@ class OpenAIEmbeddingFunction(EmbeddingFunction):
 
             except Exception as e:
                 if attempt < self.max_retries:
-                    wait_time = self.retry_delay * (2**attempt)
+                    wait_time = self.retry_delay * (2 ** attempt)
                     self.logger.warning(
                         f"Embedding creation failed (attempt {attempt + 1}): {e}. "
                         f"Retrying in {wait_time:.2f}s..."
@@ -499,7 +519,7 @@ class OpenAIEmbeddingFunction(EmbeddingFunction):
         return EmbeddingResult(
             embeddings=embeddings,
             dimensions=self._dimensions
-            or (len(embeddings[0]) if embeddings and embeddings[0] else 0),
+                       or (len(embeddings[0]) if embeddings and embeddings[0] else 0),
             cache_hits=cache_hits,
             cache_misses=cache_misses,
             execution_time=execution_time,
@@ -558,7 +578,7 @@ class DocumentProcessor:
         self.logger.info(f"Loaded {len(hashes)} content hashes for deduplication")
 
     def process_documents(
-        self, documents: List[Document]
+            self, documents: List[Document]
     ) -> Tuple[List[Document], List[Document]]:
         """Process documents with validation and deduplication."""
         unique_docs = []
@@ -569,8 +589,8 @@ class DocumentProcessor:
                 self.validate_document(doc)
 
                 if (
-                    self.enable_deduplication
-                    and doc.content_hash in self._content_hashes
+                        self.enable_deduplication
+                        and doc.content_hash in self._content_hashes
                 ):
                     duplicate_docs.append(doc)
                 else:
@@ -597,7 +617,7 @@ class MetadataManager:
         return self.collection.metadata or {}
 
     def update_metadata(
-        self, updates: Dict[str, Any], merge: bool = True
+            self, updates: Dict[str, Any], merge: bool = True
     ) -> Dict[str, Any]:
         """Update collection metadata with versioning."""
         try:
@@ -677,13 +697,13 @@ class VectorStoreManager:
     """
 
     def __init__(
-        self,
-        collection_name: str = "rag_documents",
-        persist_directory: Optional[Union[str, Path]] = None,
-        embedding_function: Optional[EmbeddingFunction] = None,
-        enable_deduplication: bool = True,
-        connection_retries: int = 3,
-        connection_retry_delay: float = 1.0,
+            self,
+            collection_name: str = "rag_documents",
+            persist_directory: Optional[Union[str, Path]] = None,
+            embedding_function: Optional[EmbeddingFunction] = None,
+            enable_deduplication: bool = True,
+            connection_retries: int = 3,
+            connection_retry_delay: float = 1.0,
     ):
         """
         Initialize VectorStoreManager.
@@ -708,7 +728,7 @@ class VectorStoreManager:
 
         # Initialize components
         self.embedding_function = (
-            embedding_function or self._create_default_embedding_function()
+                embedding_function or self._create_default_embedding_function()
         )
         self.document_processor = DocumentProcessor(enable_deduplication)
 
@@ -777,7 +797,7 @@ class VectorStoreManager:
 
             except Exception as e:
                 if attempt < self.connection_retries:
-                    wait_time = self.connection_retry_delay * (2**attempt)
+                    wait_time = self.connection_retry_delay * (2 ** attempt)
                     self.logger.warning(
                         f"Connection failed (attempt {attempt + 1}): {e}. Retrying in {wait_time:.1f}s"
                     )
@@ -792,8 +812,8 @@ class VectorStoreManager:
         current_time = time.time()
 
         if (
-            self._client is None
-            or current_time - self._last_health_check > self._health_check_interval
+                self._client is None
+                or current_time - self._last_health_check > self._health_check_interval
         ):
 
             if self._client is not None:
@@ -812,9 +832,9 @@ class VectorStoreManager:
         return self._client
 
     async def initialize_collection(
-        self,
-        metadata: Optional[Dict[str, Any]] = None,
-        embedding_function: Optional[EmbeddingFunction] = None,
+            self,
+            metadata: Optional[Dict[str, Any]] = None,
+            embedding_function: Optional[EmbeddingFunction] = None,
     ) -> Collection:
         """Initialize collection with idempotent creation."""
         try:
@@ -898,11 +918,11 @@ class VectorStoreManager:
             self.logger.warning(f"Failed to load content hashes: {e}")
 
     async def add_documents(
-        self,
-        documents: List[Document],
-        batch_size: int = 100,
-        progress_callback: Optional[ProgressCallback] = None,
-        overwrite: bool = False,
+            self,
+            documents: List[Document],
+            batch_size: int = 100,
+            progress_callback: Optional[ProgressCallback] = None,
+            overwrite: bool = False,
     ) -> OperationStats:
         """
         Add documents with comprehensive processing and monitoring.
@@ -959,7 +979,7 @@ class VectorStoreManager:
 
         try:
             for i in range(0, len(unique_docs), batch_size):
-                batch = unique_docs[i : i + batch_size]
+                batch = unique_docs[i: i + batch_size]
                 batch_start = time.time()
 
                 try:
@@ -968,7 +988,7 @@ class VectorStoreManager:
 
                     batch_time = time.time() - batch_start
                     self.logger.debug(
-                        f"Batch {i//batch_size + 1} processed in {batch_time:.2f}s"
+                        f"Batch {i // batch_size + 1} processed in {batch_time:.2f}s"
                     )
 
                     # Call progress callback
@@ -981,7 +1001,7 @@ class VectorStoreManager:
                 except Exception as e:
                     batch_failed = len(batch)
                     failed_docs += batch_failed
-                    self.logger.error(f"Batch {i//batch_size + 1} failed: {e}")
+                    self.logger.error(f"Batch {i // batch_size + 1} failed: {e}")
                     continue
 
         except Exception as e:
@@ -1018,7 +1038,7 @@ class VectorStoreManager:
         return stats
 
     async def _process_document_batch(
-        self, documents: List[Document], overwrite: bool
+            self, documents: List[Document], overwrite: bool
     ) -> None:
         """Process a batch of documents."""
         if not self._collection:
@@ -1068,11 +1088,11 @@ class VectorStoreManager:
         self._collection.add(ids=ids, documents=texts, metadatas=metadatas)
 
     async def similarity_search_with_score(
-        self,
-        query: str,
-        k: int = 10,
-        filter_dict: Optional[Dict[str, Any]] = None,
-        include_metadata: bool = True,
+            self,
+            query: str,
+            k: int = 10,
+            filter_dict: Optional[Dict[str, Any]] = None,
+            include_metadata: bool = True,
     ) -> List[SearchResult]:
         """
         Perform similarity search with scores.
@@ -1128,7 +1148,7 @@ class VectorStoreManager:
                 )
 
                 for doc_id, text, distance, metadata in zip(
-                    ids, documents, distances, metadatas
+                        ids, documents, distances, metadatas
                 ):
                     # Convert distance to similarity score
                     similarity_score = max(0.0, 1.0 - distance)
@@ -1151,10 +1171,10 @@ class VectorStoreManager:
             raise VectorStoreError(f"Search operation failed: {e}")
 
     async def backup_collection(
-        self,
-        backup_path: Union[str, Path],
-        include_embeddings: bool = True,
-        compress: bool = True,
+            self,
+            backup_path: Union[str, Path],
+            include_embeddings: bool = True,
+            compress: bool = True,
     ) -> Dict[str, Any]:
         """
         Create collection backup with async file operations.
@@ -1196,7 +1216,7 @@ class VectorStoreManager:
             # Save backup with async file operations
             timestamp = int(time.time())
             backup_file = (
-                backup_path / f"{self.collection_name}_backup_{timestamp}.json"
+                    backup_path / f"{self.collection_name}_backup_{timestamp}.json"
             )
 
             if ASYNC_IO_AVAILABLE:
@@ -1350,11 +1370,11 @@ class VectorStoreManager:
 
 # Factory functions for convenience
 async def create_openai_vector_store(
-    collection_name: str = "rag_documents",
-    api_key: Optional[str] = None,
-    model: str = "text-embedding-3-small",
-    persist_directory: Optional[Path] = None,
-    **kwargs,
+        collection_name: str = "rag_documents",
+        api_key: Optional[str] = None,
+        model: str = "text-embedding-3-small",
+        persist_directory: Optional[Path] = None,
+        **kwargs,
 ) -> VectorStoreManager:
     """Create VectorStoreManager with OpenAI embeddings."""
     if not api_key and config:
