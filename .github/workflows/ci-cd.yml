@@ -52,12 +52,16 @@ jobs:
       with:
         context: .
         push: false
+        load: true
         tags: ragmcp/rag-mcp-server:test
         cache-from: type=gha
         cache-to: type=gha,mode=max
 
     - name: Test Docker image functionality
       run: |
+        echo "Checking available Docker images:"
+        docker images
+        echo "Testing Docker image functionality:"
         docker run --rm ragmcp/rag-mcp-server:test python -c "import src.mcp_server; print('✅ Docker image works')"
 
   # Job 3: Deploy (ONLY on deploy branch - with push)
