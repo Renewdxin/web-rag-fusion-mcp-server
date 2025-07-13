@@ -459,7 +459,7 @@ python src/mcp_server.py 2>&1 | tee debug.log
 - **[API Reference](docs/API.md)**: Detailed API documentation for all components
 - **[Architecture Guide](docs/ARCHITECTURE.md)**: System design and component relationships
 - **[Configuration Guide](docs/CONFIG.md)**: Comprehensive configuration options
-- **[Technical Documentation](TECH.md)**: In-depth technical implementation details
+- **[Technical Documentation](docs/TECH.md)**: In-depth technical implementation details
 
 ## 🤝 Contributing
 

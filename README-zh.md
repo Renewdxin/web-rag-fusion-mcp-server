@@ -458,7 +458,7 @@ python src/mcp_server.py 2>&1 | tee debug.log
 - **[API 参考](docs/API.md)**: 所有组件的详细 API 文档
 - **[架构指南](docs/ARCHITECTURE.md)**: 系统设计和组件关系
 - **[配置指南](docs/CONFIG.md)**: 全面的配置选项
-- **[技术文档](TECH.md)**: 深入的技术实现细节
+- **[技术文档](docs/TECH.md)**: 深入的技术实现细节
 
 ## 🤝 贡献
 
