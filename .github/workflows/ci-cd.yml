@@ -37,6 +37,29 @@ jobs:
         python -c "import src.vector_store; print('✅ Vector store OK')"
         python -c "import src.web_search; print('✅ Web search OK')"
 
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build Docker image (test only)
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: false
+        load: true
+        tags: ragmcp/rag-mcp-server:test
+        platforms: linux/amd64
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Test Docker image
+      run: |
+        docker run --rm ragmcp/rag-mcp-server:test python -c "
+        import sys
+        sys.path.insert(0, '/app')
+        import src.mcp_server, src.vector_store, src.web_search
+        print('✅ Docker image OK')
+        "
+
   # 发布 - 仅在deploy分支推送时运行
   deploy:
     name: Deploy Release
