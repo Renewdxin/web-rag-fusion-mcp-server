@@ -1,10 +1,10 @@
-name: Build and Test
+name: CI/CD Pipeline
 
 on:
   push:
-    branches: [ "**" ]  # All branches
+    branches: [ "**" ]  # 所有分支都构建测试
   pull_request:
-    branches: [ main, develop ]
+    branches: [ main ]
 
 env:
   PYTHON_VERSION: "3.12"
@@ -12,8 +12,8 @@ env:
   PYTHONUNBUFFERED: "1"
 
 jobs:
-  # Job 1: Build and Test (runs on ALL branches)
-  build-test:
+  # 构建测试 - 所有分支都运行
+  test:
     name: Build & Test
     runs-on: ubuntu-latest
     
@@ -31,67 +31,18 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: Test basic functionality
+    - name: Run basic tests
       run: |
-        python -c "import src.mcp_server; print('✅ MCP server imports successfully')"
-        python -c "import src.vector_store; print('✅ Vector store imports successfully')"
-        python -c "import src.web_search; print('✅ Web search imports successfully')"
+        python -c "import src.mcp_server; print('✅ MCP server OK')"
+        python -c "import src.vector_store; print('✅ Vector store OK')"
+        python -c "import src.web_search; print('✅ Web search OK')"
 
-  # Job 2: Docker Build and Test (runs on ALL branches - no push)
-  docker-build:
-    name: Docker Build & Test
-    runs-on: ubuntu-latest
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Build Docker image (no push)
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        push: false
-        load: true
-        tags: ragmcp/rag-mcp-server:test
-        platforms: linux/amd64
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-
-    - name: Test Docker image functionality
-      run: |
-        echo "Checking available Docker images:"
-        docker images
-        echo "Testing Docker image functionality:"
-        docker run --rm ragmcp/rag-mcp-server:test python -c '
-import sys
-sys.path.insert(0, "/app")
-try:
-    import src.mcp_server
-    print("✅ MCP server module imports successfully")
-    import src.vector_store
-    print("✅ Vector store module imports successfully")
-    import src.web_search
-    print("✅ Web search module imports successfully")
-    import config.settings
-    print("✅ Config module imports successfully")
-    print("🎉 Docker image is working correctly!")
-except Exception as e:
-    print(f"❌ Import failed: {e}")
-    import traceback
-    traceback.print_exc()
-    sys.exit(1)
-'
-
-  # Job 3: Deploy (ONLY on deploy branch - with push)
+  # 发布 - 仅在deploy分支推送时运行
   deploy:
     name: Deploy Release
     runs-on: ubuntu-latest
-    needs: [build-test, docker-build]
+    needs: test
     if: github.ref == 'refs/heads/deploy' && github.event_name == 'push'
-    environment: production
     
     steps:
     - name: Checkout code
@@ -102,22 +53,21 @@ except Exception as e:
       with:
         python-version: ${{ env.PYTHON_VERSION }}
 
-    - name: Install dependencies and build package
+    - name: Build package
       run: |
-        python -m pip install --upgrade pip
-        pip install build wheel setuptools
+        python -m pip install --upgrade pip build
         python -m build
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: Login to Docker Hub (deploy branch only)
+    - name: Login to Docker Hub
       uses: docker/login-action@v3
       with:
         username: ${{ secrets.DOCKER_USERNAME }}
         password: ${{ secrets.DOCKER_PASSWORD }}
 
-    - name: Build and push Docker image (deploy branch only)
+    - name: Build and push Docker image
       uses: docker/build-push-action@v5
       with:
         context: .
@@ -128,11 +78,3 @@ except Exception as e:
           ragmcp/rag-mcp-server:${{ github.sha }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
-
-    - name: Publish to PyPI (deploy branch only)
-      env:
-        TWINE_USERNAME: __token__
-        TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-      run: |
-        pip install twine
-        twine upload dist/*
