@@ -8,6 +8,8 @@ on:
 
 env:
   PYTHON_VERSION: "3.12"
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUNBUFFERED: "1"
 
 jobs:
   # Job 1: Build and Test (runs on ALL branches)
