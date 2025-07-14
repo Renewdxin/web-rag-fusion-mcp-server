@@ -63,25 +63,25 @@ jobs:
         echo "Checking available Docker images:"
         docker images
         echo "Testing Docker image functionality:"
-        docker run --rm ragmcp/rag-mcp-server:test python -c "
+        docker run --rm ragmcp/rag-mcp-server:test python -c '
 import sys
-sys.path.insert(0, '/app')
+sys.path.insert(0, "/app")
 try:
     import src.mcp_server
-    print('✅ MCP server module imports successfully')
+    print("✅ MCP server module imports successfully")
     import src.vector_store
-    print('✅ Vector store module imports successfully')
+    print("✅ Vector store module imports successfully")
     import src.web_search
-    print('✅ Web search module imports successfully')
+    print("✅ Web search module imports successfully")
     import config.settings
-    print('✅ Config module imports successfully')
-    print('🎉 Docker image is working correctly!')
+    print("✅ Config module imports successfully")
+    print("🎉 Docker image is working correctly!")
 except Exception as e:
-    print(f'❌ Import failed: {e}')
+    print(f"❌ Import failed: {e}")
     import traceback
     traceback.print_exc()
     sys.exit(1)
-"
+'
 
   # Job 3: Deploy (ONLY on deploy branch - with push)
   deploy:
