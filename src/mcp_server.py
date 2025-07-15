@@ -40,13 +40,14 @@ except ImportError:
 
 # Local imports
 from config.settings import ConfigurationError, config
-from vector_store import SearchResult, VectorStoreError, VectorStoreManager, Document
-from web_search import (
+from .vector_store import SearchResult, VectorStoreError, VectorStoreManager, Document
+from .web_search import (
     WebSearchError,
     WebSearchManager,
     WebSearchResult,
 )
-from document_processor import DocumentProcessor, ProcessingStats, DocumentProcessingError
+from .document_processor import DocumentProcessor, ProcessingStats, DocumentProcessingError
+from .search_optimizer import SearchOptimizer, RankingStrategy
 
 
 class RateLimiter:
@@ -121,6 +122,9 @@ class RAGMCPServer:
 
         # Initialize document processor (lazy loading)
         self._document_processor: Optional[DocumentProcessor] = None
+
+        # Initialize search optimizer (lazy loading)
+        self._search_optimizer: Optional[SearchOptimizer] = None
 
         # Document management storage
         self._documents_metadata: Dict[str, Dict[str, Any]] = {}
@@ -720,6 +724,207 @@ class RAGMCPServer:
                     "additionalProperties": False,
                 },
             ),
+            Tool(
+                name="optimize_search",
+                description=(
+                    "Optimize search results with advanced techniques including query expansion, "
+                    "hybrid ranking, summarization, personalization, and spell correction. "
+                    "Provides enhanced search quality and user experience."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query to optimize",
+                            "minLength": 1,
+                            "maxLength": 1000,
+                        },
+                        "user_id": {
+                            "type": "string",
+                            "description": "User identifier for personalization",
+                            "default": "anonymous",
+                        },
+                        "ranking_strategy": {
+                            "type": "string",
+                            "enum": ["vector_only", "bm25_only", "hybrid_balanced", "hybrid_vector_weighted", "hybrid_bm25_weighted", "personalized"],
+                            "description": "Ranking strategy to use",
+                            "default": "hybrid_balanced",
+                        },
+                        "enable_personalization": {
+                            "type": "boolean",
+                            "description": "Enable personalization features",
+                            "default": True,
+                        },
+                        "enable_summarization": {
+                            "type": "boolean",
+                            "description": "Enable result summarization",
+                            "default": True,
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "description": "Maximum number of results to return",
+                            "minimum": 1,
+                            "maximum": 50,
+                            "default": 10,
+                        },
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            ),
+            Tool(
+                name="get_search_analytics",
+                description=(
+                    "Get comprehensive search analytics including query patterns, user behavior, "
+                    "performance metrics, and actionable insights for search optimization."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "analytics_type": {
+                            "type": "string",
+                            "enum": ["overview", "query_analytics", "user_behavior", "performance", "content_insights", "trends"],
+                            "description": "Type of analytics to retrieve",
+                            "default": "overview",
+                        },
+                        "time_period": {
+                            "type": "string",
+                            "enum": ["day", "week", "month", "all"],
+                            "description": "Time period for analytics",
+                            "default": "week",
+                        },
+                        "include_recommendations": {
+                            "type": "boolean",
+                            "description": "Include optimization recommendations",
+                            "default": True,
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            ),
+            Tool(
+                name="track_user_feedback",
+                description=(
+                    "Track user feedback and interactions to improve search personalization "
+                    "and relevance. Includes click tracking, dwell time, and explicit feedback."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "user_id": {
+                            "type": "string",
+                            "description": "User identifier",
+                            "minLength": 1,
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "Search query that generated the results",
+                            "minLength": 1,
+                        },
+                        "clicked_results": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of document IDs that were clicked",
+                            "default": [],
+                        },
+                        "dwell_times": {
+                            "type": "object",
+                            "description": "Dwell time (seconds) for each document",
+                            "additionalProperties": {"type": "number"},
+                            "default": {},
+                        },
+                        "feedback_scores": {
+                            "type": "object",
+                            "description": "Explicit feedback scores (-1 to 1) for documents",
+                            "additionalProperties": {"type": "number"},
+                            "default": {},
+                        },
+                    },
+                    "required": ["user_id", "query"],
+                    "additionalProperties": False,
+                },
+            ),
+            Tool(
+                name="create_ab_test",
+                description=(
+                    "Create A/B test experiment to compare different search strategies "
+                    "and optimize search performance based on user behavior metrics."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "experiment_id": {
+                            "type": "string",
+                            "description": "Unique identifier for the experiment",
+                            "minLength": 1,
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Human-readable name for the experiment",
+                            "minLength": 1,
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Description of what the experiment tests",
+                            "minLength": 1,
+                        },
+                        "variant_a": {
+                            "type": "object",
+                            "description": "Configuration for variant A (control)",
+                            "additionalProperties": True,
+                        },
+                        "variant_b": {
+                            "type": "object",
+                            "description": "Configuration for variant B (test)",
+                            "additionalProperties": True,
+                        },
+                        "traffic_split": {
+                            "type": "number",
+                            "description": "Traffic split for variant A (0.0-1.0)",
+                            "minimum": 0.0,
+                            "maximum": 1.0,
+                            "default": 0.5,
+                        },
+                        "duration_days": {
+                            "type": "integer",
+                            "description": "Duration of experiment in days",
+                            "minimum": 1,
+                            "maximum": 90,
+                            "default": 7,
+                        },
+                        "success_metric": {
+                            "type": "string",
+                            "description": "Primary success metric to track",
+                            "default": "click_through_rate",
+                        },
+                    },
+                    "required": ["experiment_id", "name", "description", "variant_a", "variant_b"],
+                    "additionalProperties": False,
+                },
+            ),
+            Tool(
+                name="get_ab_test_results",
+                description=(
+                    "Get results and performance metrics from A/B test experiments "
+                    "to understand which search strategies perform better."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "experiment_id": {
+                            "type": "string",
+                            "description": "Experiment ID to get results for",
+                        },
+                        "include_details": {
+                            "type": "boolean",
+                            "description": "Include detailed metrics and analysis",
+                            "default": True,
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            ),
         ]
 
     async def _call_tool(self, name: str, arguments: Dict[str, Any]) -> CallToolResult:
@@ -813,6 +1018,16 @@ class RAGMCPServer:
                         result = await self._bulk_operations(request_id, **arguments)
                     elif name == "document_analytics":
                         result = await self._document_analytics(request_id, **arguments)
+                    elif name == "optimize_search":
+                        result = await self._optimize_search(request_id, **arguments)
+                    elif name == "get_search_analytics":
+                        result = await self._get_search_analytics(request_id, **arguments)
+                    elif name == "track_user_feedback":
+                        result = await self._track_user_feedback(request_id, **arguments)
+                    elif name == "create_ab_test":
+                        result = await self._create_ab_test(request_id, **arguments)
+                    elif name == "get_ab_test_results":
+                        result = await self._get_ab_test_results(request_id, **arguments)
                     else:
                         error_msg = f"Unknown tool: {name}"
                         self.logger.error(f"[{request_id}] {error_msg}")
@@ -918,6 +1133,27 @@ class RAGMCPServer:
                 self.logger.error(f"Failed to initialize document processor: {e}")
                 raise DocumentProcessingError(f"Document processor initialization failed: {e}")
         return self._document_processor
+
+    async def _get_search_optimizer(self) -> SearchOptimizer:
+        """Get or initialize search optimizer."""
+        if self._search_optimizer is None:
+            try:
+                self._search_optimizer = SearchOptimizer(
+                    enable_query_expansion=True,
+                    enable_hybrid_ranking=True,
+                    enable_summarization=True,
+                    enable_personalization=True,
+                    enable_spell_correction=True,
+                    enable_semantic_analysis=True,
+                    enable_analytics=True,
+                    enable_ab_testing=True,
+                )
+                self.logger.info("Search optimizer initialized successfully")
+            except Exception as e:
+                self.logger.error(f"Failed to initialize search optimizer: {e}")
+                # Continue without search optimizer
+                self._search_optimizer = None
+        return self._search_optimizer
 
     def _preprocess_query(self, query: str) -> Dict[str, Any]:
         """
@@ -2667,6 +2903,404 @@ class RAGMCPServer:
         except Exception as e:
             self.logger.error(f"[{request_id}] Analytics generation failed: {e}")
             return [TextContent(type="text", text=f"❌ **Error generating analytics:** {str(e)}")]
+
+    # Search Optimization Tool Handlers
+    
+    async def _optimize_search(
+        self,
+        request_id: str,
+        query: str,
+        user_id: str = "anonymous",
+        ranking_strategy: str = "hybrid_balanced",
+        enable_personalization: bool = True,
+        enable_summarization: bool = True,
+        max_results: int = 10,
+    ) -> List[TextContent]:
+        """Optimize search results using SearchOptimizer."""
+        try:
+            # Get search optimizer
+            optimizer = await self._get_search_optimizer()
+            if not optimizer:
+                return [TextContent(type="text", text="❌ **Search optimizer not available**")]
+            
+            # First, get base search results
+            vector_store = await self._get_vector_store()
+            base_results = await vector_store.similarity_search_with_score(
+                query=query,
+                k=max_results * 2,  # Get more results for better optimization
+                include_metadata=True
+            )
+            
+            # Convert ranking strategy string to enum
+            strategy_map = {
+                "vector_only": RankingStrategy.VECTOR_ONLY,
+                "bm25_only": RankingStrategy.BM25_ONLY,
+                "hybrid_balanced": RankingStrategy.HYBRID_BALANCED,
+                "hybrid_vector_weighted": RankingStrategy.HYBRID_VECTOR_WEIGHTED,
+                "hybrid_bm25_weighted": RankingStrategy.HYBRID_BM25_WEIGHTED,
+                "personalized": RankingStrategy.PERSONALIZED,
+            }
+            strategy = strategy_map.get(ranking_strategy, RankingStrategy.HYBRID_BALANCED)
+            
+            # Optimize search results
+            optimized_results = await optimizer.optimize_search(
+                query=query,
+                user_id=user_id,
+                search_results=base_results,
+                ranking_strategy=strategy,
+                enable_personalization=enable_personalization,
+                enable_summarization=enable_summarization,
+                max_results=max_results
+            )
+            
+            # Format response
+            response_lines = [
+                f"🔍 **Optimized Search Results for '{query}'**\n",
+                f"**User:** {user_id}",
+                f"**Strategy:** {ranking_strategy}",
+                f"**Optimizations Applied:** {', '.join(optimized_results['metadata']['optimizations_applied'])}",
+                f"**Processing Time:** {optimized_results['metadata']['processing_time']:.3f}s\n",
+            ]
+            
+            # Add query analysis if available
+            if 'query_analysis' in optimized_results['metadata']:
+                analysis = optimized_results['metadata']['query_analysis']
+                response_lines.extend([
+                    f"**Query Analysis:**",
+                    f"• Type: {analysis['type']}",
+                    f"• Intent: {analysis['intent']}",
+                    f"• Complexity: {analysis['complexity']:.2f}",
+                    f"• Confidence: {analysis['confidence']:.2f}\n"
+                ])
+            
+            # Add expanded query information
+            if 'expanded_query' in optimized_results['metadata']:
+                expanded = optimized_results['metadata']['expanded_query']
+                if expanded['synonyms']:
+                    response_lines.append(f"**Query Expansion:** {len(expanded['synonyms'])} terms expanded")
+                if expanded['boost_terms']:
+                    response_lines.append(f"**Boost Terms:** {', '.join(expanded['boost_terms'])}")
+                response_lines.append("")
+            
+            # Add spelling suggestions if available
+            if 'spelling_suggestions' in optimized_results['metadata']:
+                suggestions = optimized_results['metadata']['spelling_suggestions']
+                if suggestions:
+                    response_lines.append(f"**Spelling Suggestions:** {len(suggestions)} corrections found\n")
+            
+            # Display optimized results
+            response_lines.append(f"**Results ({len(optimized_results['optimized_results'])}):**\n")
+            
+            for i, result_data in enumerate(optimized_results['optimized_results'], 1):
+                doc = result_data['document']
+                ranking_score = result_data['ranking_score']
+                summary = result_data['summary']
+                
+                # Format document info
+                source = doc.metadata.get('source', 'Unknown')[:50]
+                response_lines.extend([
+                    f"**{i}. Score: {ranking_score.final_score:.3f}**",
+                    f"📂 **Source:** {source}",
+                    f"📊 **Ranking:** Vector: {ranking_score.vector_score:.3f}, BM25: {ranking_score.bm25_score:.3f}, Personal: {ranking_score.personalization_score:.3f}",
+                ])
+                
+                # Add summary if available
+                if summary and enable_summarization:
+                    response_lines.extend([
+                        f"📄 **Summary:** {summary.summary_text[:200]}{'...' if len(summary.summary_text) > 200 else ''}",
+                        f"🎯 **Relevance:** {summary.relevance_score:.3f}",
+                    ])
+                else:
+                    # Fallback to content preview
+                    preview = doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content
+                    response_lines.append(f"📄 **Content:** {preview}")
+                
+                response_lines.append("─" * 50)
+            
+            return [TextContent(type="text", text="\n".join(response_lines))]
+            
+        except Exception as e:
+            self.logger.error(f"[{request_id}] Search optimization failed: {e}")
+            return [TextContent(type="text", text=f"❌ **Error optimizing search:** {str(e)}")]
+
+    async def _get_search_analytics(
+        self,
+        request_id: str,
+        analytics_type: str = "overview",
+        time_period: str = "week",
+        include_recommendations: bool = True,
+    ) -> List[TextContent]:
+        """Get search analytics dashboard data."""
+        try:
+            optimizer = await self._get_search_optimizer()
+            if not optimizer:
+                return [TextContent(type="text", text="❌ **Search optimizer not available**")]
+            
+            dashboard_data = optimizer.get_analytics_dashboard()
+            
+            if "error" in dashboard_data:
+                return [TextContent(type="text", text=f"❌ **Analytics error:** {dashboard_data['error']}")]
+            
+            # Format response based on analytics type
+            if analytics_type == "overview":
+                overview = dashboard_data.get('overview', {})
+                if 'no_data' in overview:
+                    return [TextContent(type="text", text="📊 **No analytics data available yet**")]
+                
+                response = f"""📊 **Search Analytics Overview**
+
+**Query Statistics:**
+• Total queries: {overview.get('total_queries', 0)}
+• Daily queries: {overview.get('daily_queries', 0)}
+• Weekly queries: {overview.get('weekly_queries', 0)}
+• Unique users: {overview.get('unique_users', 0)}
+
+**Performance Metrics:**
+• Average response time: {overview.get('avg_response_time', 0):.3f}s
+• Click-through rate: {overview.get('click_through_rate', 0):.1%}
+• Average dwell time: {overview.get('avg_dwell_time', 0):.2f}s
+• Queries per user: {overview.get('queries_per_user', 0):.2f}
+"""
+                
+            elif analytics_type == "query_analytics":
+                query_data = dashboard_data.get('query_analytics', {})
+                if 'no_data' in query_data:
+                    return [TextContent(type="text", text="📊 **No query analytics data available yet**")]
+                
+                response = f"""📊 **Query Analytics**
+
+**Query Types:**
+{chr(10).join(f'• {qtype}: {count}' for qtype, count in query_data.get('query_types', {}).items())}
+
+**Search Intents:**
+{chr(10).join(f'• {intent}: {count}' for intent, count in query_data.get('intents', {}).items())}
+
+**Performance:**
+• Average complexity: {query_data.get('avg_complexity', 0):.3f}
+• Failure rate: {query_data.get('failure_rate', 0):.1%}
+• Average query length: {query_data.get('avg_query_length', 0):.2f} words
+
+**Popular Queries:**
+{chr(10).join(f'• {query}: {count}' for query, count in query_data.get('popular_queries', [])[:5])}
+"""
+                
+            elif analytics_type == "user_behavior":
+                user_data = dashboard_data.get('user_behavior', {})
+                if 'no_data' in user_data:
+                    return [TextContent(type="text", text="📊 **No user behavior data available yet**")]
+                
+                response = f"""📊 **User Behavior Analytics**
+
+**Session Statistics:**
+• Average session length: {user_data.get('avg_session_length', 0):.2f} queries
+• Average session duration: {user_data.get('avg_session_duration', 0):.2f}s
+• Total sessions: {user_data.get('total_sessions', 0)}
+• Returning users: {user_data.get('returning_users', 0)}
+
+**Engagement Metrics:**
+• Engagement rate: {user_data.get('engagement_rate', 0):.1%}
+• Bounce rate: {user_data.get('bounce_rate', 0):.1%}
+• Average click position: {user_data.get('avg_click_position', 0):.2f}
+"""
+                
+            elif analytics_type == "performance":
+                perf_data = dashboard_data.get('performance', {})
+                if 'no_data' in perf_data:
+                    return [TextContent(type="text", text="📊 **No performance data available yet**")]
+                
+                response = f"""📊 **Performance Analytics**
+
+**Overall Performance:**
+• Success rate: {perf_data.get('success_rate', 0):.1%}
+• Average response time: {perf_data.get('avg_response_time', 0):.3f}s
+• Total operations: {perf_data.get('total_operations', 0)}
+
+**Response Time Distribution:**
+• Min: {perf_data.get('min_response_time', 0):.3f}s
+• Max: {perf_data.get('max_response_time', 0):.3f}s
+"""
+                
+            else:
+                response = f"📊 **Analytics for {analytics_type}**\n\nDetailed analytics data available. Use specific analytics type for focused insights."
+            
+            # Add recommendations if requested
+            if include_recommendations and 'recommendations' in dashboard_data:
+                recommendations = dashboard_data['recommendations']
+                if recommendations:
+                    response += f"\n\n**💡 Recommendations:**\n"
+                    for rec in recommendations[:3]:  # Show top 3
+                        priority_emoji = "🔴" if rec['priority'] == 'high' else "🟡" if rec['priority'] == 'medium' else "🟢"
+                        response += f"\n{priority_emoji} **{rec['title']}**\n{rec['description']}\n*Action:* {rec['action']}\n"
+            
+            return [TextContent(type="text", text=response)]
+            
+        except Exception as e:
+            self.logger.error(f"[{request_id}] Analytics retrieval failed: {e}")
+            return [TextContent(type="text", text=f"❌ **Error retrieving analytics:** {str(e)}")]
+
+    async def _track_user_feedback(
+        self,
+        request_id: str,
+        user_id: str,
+        query: str,
+        clicked_results: List[str] = None,
+        dwell_times: Dict[str, float] = None,
+        feedback_scores: Dict[str, int] = None,
+    ) -> List[TextContent]:
+        """Track user feedback for personalization."""
+        try:
+            optimizer = await self._get_search_optimizer()
+            if not optimizer:
+                return [TextContent(type="text", text="❌ **Search optimizer not available**")]
+            
+            clicked_results = clicked_results or []
+            dwell_times = dwell_times or {}
+            feedback_scores = feedback_scores or {}
+            
+            # Track feedback
+            optimizer.track_user_feedback(
+                user_id=user_id,
+                query=query,
+                clicked_results=clicked_results,
+                dwell_times=dwell_times,
+                feedback_scores=feedback_scores
+            )
+            
+            # Update document usage analytics
+            for doc_id in clicked_results:
+                if doc_id in self._document_usage:
+                    self._document_usage[doc_id]["access_count"] += 1
+                    self._document_usage[doc_id]["last_accessed"] = datetime.now().isoformat()
+            
+            response = f"""✅ **User Feedback Tracked**
+
+**User:** {user_id}
+**Query:** {query}
+**Clicked Results:** {len(clicked_results)}
+**Dwell Time Data:** {len(dwell_times)} documents
+**Feedback Scores:** {len(feedback_scores)} documents
+
+**Summary:**
+• Average dwell time: {sum(dwell_times.values()) / len(dwell_times):.2f}s
+• Average feedback score: {sum(feedback_scores.values()) / len(feedback_scores):.2f}
+• Personalization data updated for future searches
+"""
+            
+            return [TextContent(type="text", text=response)]
+            
+        except Exception as e:
+            self.logger.error(f"[{request_id}] Feedback tracking failed: {e}")
+            return [TextContent(type="text", text=f"❌ **Error tracking feedback:** {str(e)}")]
+
+    async def _create_ab_test(
+        self,
+        request_id: str,
+        experiment_id: str,
+        name: str,
+        description: str,
+        variant_a: Dict[str, Any],
+        variant_b: Dict[str, Any],
+        traffic_split: float = 0.5,
+        duration_days: int = 7,
+        success_metric: str = "click_through_rate",
+    ) -> List[TextContent]:
+        """Create A/B test experiment."""
+        try:
+            optimizer = await self._get_search_optimizer()
+            if not optimizer:
+                return [TextContent(type="text", text="❌ **Search optimizer not available**")]
+            
+            # Create A/B test
+            optimizer.create_ab_test(
+                experiment_id=experiment_id,
+                name=name,
+                description=description,
+                variant_a=variant_a,
+                variant_b=variant_b,
+                traffic_split=traffic_split,
+                duration_days=duration_days,
+                success_metric=success_metric
+            )
+            
+            response = f"""🧪 **A/B Test Created Successfully**
+
+**Experiment Details:**
+• ID: {experiment_id}
+• Name: {name}
+• Description: {description}
+• Duration: {duration_days} days
+• Traffic Split: {traffic_split * 100:.1f}% / {(1 - traffic_split) * 100:.1f}%
+• Success Metric: {success_metric}
+
+**Variant A (Control):**
+{chr(10).join(f'• {key}: {value}' for key, value in variant_a.items())}
+
+**Variant B (Test):**
+{chr(10).join(f'• {key}: {value}' for key, value in variant_b.items())}
+
+**Status:** Active - experiment is now running
+"""
+            
+            return [TextContent(type="text", text=response)]
+            
+        except Exception as e:
+            self.logger.error(f"[{request_id}] A/B test creation failed: {e}")
+            return [TextContent(type="text", text=f"❌ **Error creating A/B test:** {str(e)}")]
+
+    async def _get_ab_test_results(
+        self,
+        request_id: str,
+        experiment_id: str = None,
+        include_details: bool = True,
+    ) -> List[TextContent]:
+        """Get A/B test results."""
+        try:
+            optimizer = await self._get_search_optimizer()
+            if not optimizer:
+                return [TextContent(type="text", text="❌ **Search optimizer not available**")]
+            
+            results = optimizer.get_ab_test_results()
+            
+            if "error" in results:
+                return [TextContent(type="text", text=f"❌ **A/B test error:** {results['error']}")]
+            
+            if experiment_id:
+                # Get specific experiment results
+                if experiment_id in results['experiments']:
+                    exp_data = results['experiments'][experiment_id]
+                    
+                    response = f"""🧪 **A/B Test Results: {experiment_id}**
+
+**Experiment:** {exp_data['name']}
+**Status:** {exp_data['status']}
+**Duration:** {exp_data['start_date']} to {exp_data['end_date']}
+**Has Results:** {'Yes' if exp_data['has_results'] else 'No'}
+**Winner:** {exp_data['winner'] or 'No significant difference'}
+"""
+                else:
+                    response = f"❌ **Experiment not found:** {experiment_id}"
+            else:
+                # Get summary of all experiments
+                response = f"""🧪 **A/B Test Summary**
+
+**Overview:**
+• Total experiments: {results['total_experiments']}
+• Active experiments: {results['active_experiments']}
+• Completed experiments: {results['completed_experiments']}
+
+**Experiments:**
+"""
+                
+                for exp_id, exp_data in results['experiments'].items():
+                    status_emoji = "🟢" if exp_data['status'] == 'active' else "🔵" if exp_data['status'] == 'completed' else "⚪"
+                    winner_text = f" (Winner: {exp_data['winner']})" if exp_data['winner'] else ""
+                    response += f"\n{status_emoji} **{exp_id}:** {exp_data['name']}{winner_text}"
+            
+            return [TextContent(type="text", text=response)]
+            
+        except Exception as e:
+            self.logger.error(f"[{request_id}] A/B test results retrieval failed: {e}")
+            return [TextContent(type="text", text=f"❌ **Error retrieving A/B test results:** {str(e)}")]
 
     def _validate_startup_dependencies(self) -> None:
         """
