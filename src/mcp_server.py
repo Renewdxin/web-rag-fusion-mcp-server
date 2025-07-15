@@ -40,13 +40,13 @@ except ImportError:
 
 # Local imports
 from config.settings import ConfigurationError, config
-from .vector_store import SearchResult, VectorStoreError, VectorStoreManager, Document
-from .web_search import (
+from vector_store import SearchResult, VectorStoreError, VectorStoreManager, Document
+from web_search import (
     WebSearchError,
     WebSearchManager,
     WebSearchResult,
 )
-from .document_processor import DocumentProcessor, ProcessingStats, DocumentProcessingError
+from document_processor import DocumentProcessor, ProcessingStats, DocumentProcessingError
 
 
 class RateLimiter:
@@ -910,7 +910,7 @@ class RAGMCPServer:
             try:
                 self._document_processor = DocumentProcessor(
                     chunk_size=getattr(config, "CHUNK_SIZE", 1000),
-                    chunk_overlap=getattr(config, "CHUNK_OVERLAP", 200),
+                    overlap=getattr(config, "CHUNK_OVERLAP", 200),
                     max_concurrency=getattr(config, "MAX_CONCURRENCY", 5),
                 )
                 self.logger.info("Document processor initialized successfully")
