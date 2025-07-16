@@ -40,12 +40,14 @@ except ImportError:
 
 # Local imports
 from config.settings import ConfigurationError, config
-from .vector_store import SearchResult, VectorStoreError, VectorStoreManager
+from .vector_store import SearchResult, VectorStoreError, VectorStoreManager, Document
 from .web_search import (
     WebSearchError,
     WebSearchManager,
     WebSearchResult,
 )
+from .document_processor import DocumentProcessor, ProcessingStats, DocumentProcessingError
+from .search_optimizer import SearchOptimizer, RankingStrategy
 
 
 class RateLimiter:
@@ -117,6 +119,18 @@ class RAGMCPServer:
 
         # Initialize web search manager (lazy loading)
         self._web_search: Optional[WebSearchManager] = None
+
+        # Initialize document processor (lazy loading)
+        self._document_processor: Optional[DocumentProcessor] = None
+
+        # Initialize search optimizer (lazy loading)
+        self._search_optimizer: Optional[SearchOptimizer] = None
+
+        # Document management storage
+        self._documents_metadata: Dict[str, Dict[str, Any]] = {}
+        self._document_tags: Dict[str, List[str]] = {}
+        self._document_usage: Dict[str, Dict[str, Any]] = {}
+        self._document_versions: Dict[str, List[Dict[str, Any]]] = {}
 
     def _setup_logging(self) -> logging.Logger:
         """Configure comprehensive logging."""
@@ -371,6 +385,546 @@ class RAGMCPServer:
                     "additionalProperties": False,
                 },
             ),
+            Tool(
+                name="add_document",
+                description=(
+                    "Add a document to the knowledge base. Supports both file paths and raw content. "
+                    "Automatically detects file type and processes the document with intelligent chunking. "
+                    "Returns document ID and processing statistics. Supports batch additions."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "content": {
+                            "type": "string",
+                            "description": "Raw text content (alternative to file_path)",
+                            "minLength": 1,
+                        },
+                        "file_path": {
+                            "type": "string",
+                            "description": "Path to file to process (alternative to content)",
+                        },
+                        "metadata": {
+                            "type": "object",
+                            "description": "Additional metadata for the document",
+                            "additionalProperties": True,
+                            "default": {},
+                        },
+                        "tags": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Tags to associate with the document",
+                            "default": [],
+                        },
+                        "batch_files": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Multiple file paths for batch processing",
+                            "default": [],
+                        },
+                        "auto_detect_type": {
+                            "type": "boolean",
+                            "description": "Whether to auto-detect file type",
+                            "default": True,
+                        },
+                    },
+                    "oneOf": [
+                        {"required": ["content"]},
+                        {"required": ["file_path"]},
+                        {"required": ["batch_files"]},
+                    ],
+                    "additionalProperties": False,
+                },
+            ),
+            Tool(
+                name="update_document",
+                description=(
+                    "Update an existing document in the knowledge base. Supports partial updates "
+                    "with version history maintenance. Re-indexes affected document chunks and "
+                    "implements conflict detection and resolution."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "document_id": {
+                            "type": "string",
+                            "description": "ID of the document to update",
+                            "minLength": 1,
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "New content for the document",
+                        },
+                        "metadata": {
+                            "type": "object",
+                            "description": "Metadata fields to update",
+                            "additionalProperties": True,
+                        },
+                        "tags": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Updated tags for the document",
+                        },
+                        "partial_update": {
+                            "type": "boolean",
+                            "description": "Whether to perform a partial update (merge with existing)",
+                            "default": True,
+                        },
+                        "create_version": {
+                            "type": "boolean",
+                            "description": "Whether to create a version backup",
+                            "default": True,
+                        },
+                        "force_update": {
+                            "type": "boolean",
+                            "description": "Force update even if conflicts detected",
+                            "default": False,
+                        },
+                    },
+                    "required": ["document_id"],
+                    "additionalProperties": False,
+                },
+            ),
+            Tool(
+                name="delete_document",
+                description=(
+                    "Delete a document from the knowledge base with soft delete capability. "
+                    "Provides recovery option, cleans up orphaned chunks, and updates related indices."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "document_id": {
+                            "type": "string",
+                            "description": "ID of the document to delete",
+                            "minLength": 1,
+                        },
+                        "soft_delete": {
+                            "type": "boolean",
+                            "description": "Whether to perform soft delete (recoverable)",
+                            "default": True,
+                        },
+                        "cleanup_chunks": {
+                            "type": "boolean",
+                            "description": "Whether to clean up associated chunks",
+                            "default": True,
+                        },
+                        "update_indices": {
+                            "type": "boolean",
+                            "description": "Whether to update related indices",
+                            "default": True,
+                        },
+                        "backup_before_delete": {
+                            "type": "boolean",
+                            "description": "Create backup before deletion",
+                            "default": True,
+                        },
+                    },
+                    "required": ["document_id"],
+                    "additionalProperties": False,
+                },
+            ),
+            Tool(
+                name="list_documents",
+                description=(
+                    "List documents in the knowledge base with comprehensive filtering and pagination. "
+                    "Supports metadata filtering, tag-based search, date range queries, and various sort options. "
+                    "Returns document statistics and detailed information."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "page": {
+                            "type": "integer",
+                            "description": "Page number (1-based)",
+                            "minimum": 1,
+                            "default": 1,
+                        },
+                        "page_size": {
+                            "type": "integer",
+                            "description": "Number of items per page",
+                            "minimum": 1,
+                            "maximum": 100,
+                            "default": 20,
+                        },
+                        "filter_metadata": {
+                            "type": "object",
+                            "description": "Filter by metadata fields",
+                            "additionalProperties": True,
+                        },
+                        "filter_tags": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Filter by tags (OR logic)",
+                        },
+                        "filter_type": {
+                            "type": "string",
+                            "description": "Filter by document type",
+                        },
+                        "date_from": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "Filter documents created after this date",
+                        },
+                        "date_to": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "Filter documents created before this date",
+                        },
+                        "sort_by": {
+                            "type": "string",
+                            "enum": ["date", "size", "type", "name", "usage"],
+                            "description": "Sort criteria",
+                            "default": "date",
+                        },
+                        "sort_order": {
+                            "type": "string",
+                            "enum": ["asc", "desc"],
+                            "description": "Sort order",
+                            "default": "desc",
+                        },
+                        "include_stats": {
+                            "type": "boolean",
+                            "description": "Include document statistics",
+                            "default": True,
+                        },
+                        "include_deleted": {
+                            "type": "boolean",
+                            "description": "Include soft-deleted documents",
+                            "default": False,
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            ),
+            Tool(
+                name="manage_tags",
+                description=(
+                    "Manage document tags - add, remove, or list tags. Supports tag-based search "
+                    "filtering and bulk tag operations across multiple documents."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["add", "remove", "list", "search"],
+                            "description": "Tag management action",
+                        },
+                        "document_id": {
+                            "type": "string",
+                            "description": "Document ID (for add/remove actions)",
+                        },
+                        "document_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Multiple document IDs for bulk operations",
+                        },
+                        "tags": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Tags to add or remove",
+                        },
+                        "search_tags": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Tags to search for (for search action)",
+                        },
+                        "tag_filter": {
+                            "type": "string",
+                            "description": "Filter tags by pattern (for list action)",
+                        },
+                    },
+                    "required": ["action"],
+                    "additionalProperties": False,
+                },
+            ),
+            Tool(
+                name="bulk_operations",
+                description=(
+                    "Perform bulk operations on multiple documents - add, update, delete, or tag operations. "
+                    "Provides batch processing with progress tracking and error handling."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "operation": {
+                            "type": "string",
+                            "enum": ["add", "update", "delete", "tag"],
+                            "description": "Bulk operation type",
+                        },
+                        "documents": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": True,
+                            },
+                            "description": "List of documents/operations to process",
+                        },
+                        "batch_size": {
+                            "type": "integer",
+                            "description": "Number of documents to process in each batch",
+                            "minimum": 1,
+                            "maximum": 50,
+                            "default": 10,
+                        },
+                        "continue_on_error": {
+                            "type": "boolean",
+                            "description": "Continue processing if individual operations fail",
+                            "default": True,
+                        },
+                        "progress_callback": {
+                            "type": "boolean",
+                            "description": "Provide progress updates",
+                            "default": True,
+                        },
+                    },
+                    "required": ["operation", "documents"],
+                    "additionalProperties": False,
+                },
+            ),
+            Tool(
+                name="document_analytics",
+                description=(
+                    "Get document usage analytics including access frequency, search hits, "
+                    "popular documents, and usage patterns over time."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "document_id": {
+                            "type": "string",
+                            "description": "Specific document ID for detailed analytics",
+                        },
+                        "analytics_type": {
+                            "type": "string",
+                            "enum": ["overview", "usage", "search_hits", "popular", "trends"],
+                            "description": "Type of analytics to retrieve",
+                            "default": "overview",
+                        },
+                        "time_range": {
+                            "type": "string",
+                            "enum": ["day", "week", "month", "year", "all"],
+                            "description": "Time range for analytics",
+                            "default": "month",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of results",
+                            "minimum": 1,
+                            "maximum": 100,
+                            "default": 20,
+                        },
+                        "include_charts": {
+                            "type": "boolean",
+                            "description": "Include ASCII charts in results",
+                            "default": False,
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            ),
+            Tool(
+                name="optimize_search",
+                description=(
+                    "Optimize search results with advanced techniques including query expansion, "
+                    "hybrid ranking, summarization, personalization, and spell correction. "
+                    "Provides enhanced search quality and user experience."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query to optimize",
+                            "minLength": 1,
+                            "maxLength": 1000,
+                        },
+                        "user_id": {
+                            "type": "string",
+                            "description": "User identifier for personalization",
+                            "default": "anonymous",
+                        },
+                        "ranking_strategy": {
+                            "type": "string",
+                            "enum": ["vector_only", "bm25_only", "hybrid_balanced", "hybrid_vector_weighted", "hybrid_bm25_weighted", "personalized"],
+                            "description": "Ranking strategy to use",
+                            "default": "hybrid_balanced",
+                        },
+                        "enable_personalization": {
+                            "type": "boolean",
+                            "description": "Enable personalization features",
+                            "default": True,
+                        },
+                        "enable_summarization": {
+                            "type": "boolean",
+                            "description": "Enable result summarization",
+                            "default": True,
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "description": "Maximum number of results to return",
+                            "minimum": 1,
+                            "maximum": 50,
+                            "default": 10,
+                        },
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            ),
+            Tool(
+                name="get_search_analytics",
+                description=(
+                    "Get comprehensive search analytics including query patterns, user behavior, "
+                    "performance metrics, and actionable insights for search optimization."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "analytics_type": {
+                            "type": "string",
+                            "enum": ["overview", "query_analytics", "user_behavior", "performance", "content_insights", "trends"],
+                            "description": "Type of analytics to retrieve",
+                            "default": "overview",
+                        },
+                        "time_period": {
+                            "type": "string",
+                            "enum": ["day", "week", "month", "all"],
+                            "description": "Time period for analytics",
+                            "default": "week",
+                        },
+                        "include_recommendations": {
+                            "type": "boolean",
+                            "description": "Include optimization recommendations",
+                            "default": True,
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            ),
+            Tool(
+                name="track_user_feedback",
+                description=(
+                    "Track user feedback and interactions to improve search personalization "
+                    "and relevance. Includes click tracking, dwell time, and explicit feedback."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "user_id": {
+                            "type": "string",
+                            "description": "User identifier",
+                            "minLength": 1,
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "Search query that generated the results",
+                            "minLength": 1,
+                        },
+                        "clicked_results": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of document IDs that were clicked",
+                            "default": [],
+                        },
+                        "dwell_times": {
+                            "type": "object",
+                            "description": "Dwell time (seconds) for each document",
+                            "additionalProperties": {"type": "number"},
+                            "default": {},
+                        },
+                        "feedback_scores": {
+                            "type": "object",
+                            "description": "Explicit feedback scores (-1 to 1) for documents",
+                            "additionalProperties": {"type": "number"},
+                            "default": {},
+                        },
+                    },
+                    "required": ["user_id", "query"],
+                    "additionalProperties": False,
+                },
+            ),
+            Tool(
+                name="create_ab_test",
+                description=(
+                    "Create A/B test experiment to compare different search strategies "
+                    "and optimize search performance based on user behavior metrics."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "experiment_id": {
+                            "type": "string",
+                            "description": "Unique identifier for the experiment",
+                            "minLength": 1,
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Human-readable name for the experiment",
+                            "minLength": 1,
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Description of what the experiment tests",
+                            "minLength": 1,
+                        },
+                        "variant_a": {
+                            "type": "object",
+                            "description": "Configuration for variant A (control)",
+                            "additionalProperties": True,
+                        },
+                        "variant_b": {
+                            "type": "object",
+                            "description": "Configuration for variant B (test)",
+                            "additionalProperties": True,
+                        },
+                        "traffic_split": {
+                            "type": "number",
+                            "description": "Traffic split for variant A (0.0-1.0)",
+                            "minimum": 0.0,
+                            "maximum": 1.0,
+                            "default": 0.5,
+                        },
+                        "duration_days": {
+                            "type": "integer",
+                            "description": "Duration of experiment in days",
+                            "minimum": 1,
+                            "maximum": 90,
+                            "default": 7,
+                        },
+                        "success_metric": {
+                            "type": "string",
+                            "description": "Primary success metric to track",
+                            "default": "click_through_rate",
+                        },
+                    },
+                    "required": ["experiment_id", "name", "description", "variant_a", "variant_b"],
+                    "additionalProperties": False,
+                },
+            ),
+            Tool(
+                name="get_ab_test_results",
+                description=(
+                    "Get results and performance metrics from A/B test experiments "
+                    "to understand which search strategies perform better."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "experiment_id": {
+                            "type": "string",
+                            "description": "Experiment ID to get results for",
+                        },
+                        "include_details": {
+                            "type": "boolean",
+                            "description": "Include detailed metrics and analysis",
+                            "default": True,
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            ),
         ]
 
     async def _call_tool(self, name: str, arguments: Dict[str, Any]) -> CallToolResult:
@@ -450,6 +1004,30 @@ class RAGMCPServer:
                         result = await self._smart_search_internal(
                             request_id, **smart_search_args
                         )
+                    elif name == "add_document":
+                        result = await self._add_document(request_id, **arguments)
+                    elif name == "update_document":
+                        result = await self._update_document(request_id, **arguments)
+                    elif name == "delete_document":
+                        result = await self._delete_document(request_id, **arguments)
+                    elif name == "list_documents":
+                        result = await self._list_documents(request_id, **arguments)
+                    elif name == "manage_tags":
+                        result = await self._manage_tags(request_id, **arguments)
+                    elif name == "bulk_operations":
+                        result = await self._bulk_operations(request_id, **arguments)
+                    elif name == "document_analytics":
+                        result = await self._document_analytics(request_id, **arguments)
+                    elif name == "optimize_search":
+                        result = await self._optimize_search(request_id, **arguments)
+                    elif name == "get_search_analytics":
+                        result = await self._get_search_analytics(request_id, **arguments)
+                    elif name == "track_user_feedback":
+                        result = await self._track_user_feedback(request_id, **arguments)
+                    elif name == "create_ab_test":
+                        result = await self._create_ab_test(request_id, **arguments)
+                    elif name == "get_ab_test_results":
+                        result = await self._get_ab_test_results(request_id, **arguments)
                     else:
                         error_msg = f"Unknown tool: {name}"
                         self.logger.error(f"[{request_id}] {error_msg}")
@@ -540,6 +1118,42 @@ class RAGMCPServer:
                 self.logger.error(f"Failed to initialize web search manager: {e}")
                 raise WebSearchError(f"Web search initialization failed: {e}")
         return self._web_search
+
+    async def _get_document_processor(self) -> DocumentProcessor:
+        """Get or initialize document processor."""
+        if self._document_processor is None:
+            try:
+                self._document_processor = DocumentProcessor(
+                    chunk_size=getattr(config, "CHUNK_SIZE", 1000),
+                    overlap=getattr(config, "CHUNK_OVERLAP", 200),
+                    max_concurrency=getattr(config, "MAX_CONCURRENCY", 5),
+                )
+                self.logger.info("Document processor initialized successfully")
+            except Exception as e:
+                self.logger.error(f"Failed to initialize document processor: {e}")
+                raise DocumentProcessingError(f"Document processor initialization failed: {e}")
+        return self._document_processor
+
+    async def _get_search_optimizer(self) -> SearchOptimizer:
+        """Get or initialize search optimizer."""
+        if self._search_optimizer is None:
+            try:
+                self._search_optimizer = SearchOptimizer(
+                    enable_query_expansion=True,
+                    enable_hybrid_ranking=True,
+                    enable_summarization=True,
+                    enable_personalization=True,
+                    enable_spell_correction=True,
+                    enable_semantic_analysis=True,
+                    enable_analytics=True,
+                    enable_ab_testing=True,
+                )
+                self.logger.info("Search optimizer initialized successfully")
+            except Exception as e:
+                self.logger.error(f"Failed to initialize search optimizer: {e}")
+                # Continue without search optimizer
+                self._search_optimizer = None
+        return self._search_optimizer
 
     def _preprocess_query(self, query: str) -> Dict[str, Any]:
         """
@@ -1722,6 +2336,972 @@ class RAGMCPServer:
             else "No specific recommendations available."
         )
 
+    # Document Management Tool Handlers
+    
+    async def _add_document(
+        self,
+        request_id: str,
+        content: Optional[str] = None,
+        file_path: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        tags: Optional[List[str]] = None,
+        batch_files: Optional[List[str]] = None,
+        auto_detect_type: bool = True,
+    ) -> List[TextContent]:
+        """Add document(s) to the knowledge base."""
+        try:
+            doc_processor = await self._get_document_processor()
+            vector_store = await self._get_vector_store()
+            
+            metadata = metadata or {}
+            tags = tags or []
+            batch_files = batch_files or []
+            
+            # Track processing results
+            results = []
+            total_chunks = 0
+            processing_time = time.time()
+            
+            if batch_files:
+                # Batch processing
+                for file in batch_files:
+                    try:
+                        processed_docs = await doc_processor.process_file(Path(file))
+                        for doc in processed_docs:
+                            doc_id = str(uuid.uuid4())
+                            doc.metadata.update(metadata)
+                            doc.metadata["document_id"] = doc_id
+                            doc.metadata["tags"] = tags
+                            doc.metadata["created_at"] = datetime.now().isoformat()
+                            
+                            # Store in vector database
+                            await vector_store.add_documents([Document(
+                                page_content=doc.content,
+                                metadata=doc.metadata,
+                                id=doc_id
+                            )])
+                            
+                            # Track document metadata
+                            self._documents_metadata[doc_id] = doc.metadata
+                            self._document_tags[doc_id] = tags
+                            self._document_usage[doc_id] = {"access_count": 0, "last_accessed": None}
+                            
+                            total_chunks += 1
+                            results.append(f"✅ {Path(file).name}: {doc_id}")
+                    except Exception as e:
+                        results.append(f"❌ {Path(file).name}: {str(e)}")
+                        
+            elif file_path:
+                # Single file processing
+                processed_docs = await doc_processor.process_file(Path(file_path))
+                for doc in processed_docs:
+                    doc_id = str(uuid.uuid4())
+                    doc.metadata.update(metadata)
+                    doc.metadata["document_id"] = doc_id
+                    doc.metadata["tags"] = tags
+                    doc.metadata["created_at"] = datetime.now().isoformat()
+                    
+                    await vector_store.add_documents([Document(
+                        page_content=doc.content,
+                        metadata=doc.metadata,
+                        id=doc_id
+                    )])
+                    
+                    self._documents_metadata[doc_id] = doc.metadata
+                    self._document_tags[doc_id] = tags
+                    self._document_usage[doc_id] = {"access_count": 0, "last_accessed": None}
+                    
+                    total_chunks += 1
+                    results.append(f"✅ Document added: {doc_id}")
+                    
+            elif content:
+                # Raw content processing
+                doc_id = str(uuid.uuid4())
+                enhanced_metadata = {
+                    **metadata,
+                    "document_id": doc_id,
+                    "tags": tags,
+                    "created_at": datetime.now().isoformat(),
+                    "source": "raw_content",
+                    "content_length": len(content)
+                }
+                
+                await vector_store.add_documents([Document(
+                    page_content=content,
+                    metadata=enhanced_metadata,
+                    id=doc_id
+                )])
+                
+                self._documents_metadata[doc_id] = enhanced_metadata
+                self._document_tags[doc_id] = tags
+                self._document_usage[doc_id] = {"access_count": 0, "last_accessed": None}
+                
+                total_chunks += 1
+                results.append(f"✅ Content added: {doc_id}")
+                
+            processing_time = time.time() - processing_time
+            
+            # Format response
+            response = f"""📄 **Document Addition Complete**
+
+**Processing Summary:**
+• Documents processed: {len(results)}
+• Total chunks created: {total_chunks}
+• Processing time: {processing_time:.2f}s
+
+**Results:**
+{chr(10).join(results)}
+
+**Statistics:**
+• Success rate: {len([r for r in results if r.startswith('✅')])/len(results)*100:.1f}%
+• Failed: {len([r for r in results if r.startswith('❌')])}
+"""
+            
+            return [TextContent(type="text", text=response)]
+            
+        except Exception as e:
+            self.logger.error(f"[{request_id}] Document addition failed: {e}")
+            return [TextContent(type="text", text=f"❌ **Error adding document:** {str(e)}")]
+
+    async def _update_document(
+        self,
+        request_id: str,
+        document_id: str,
+        content: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        tags: Optional[List[str]] = None,
+        partial_update: bool = True,
+        create_version: bool = True,
+        force_update: bool = False,
+    ) -> List[TextContent]:
+        """Update an existing document."""
+        try:
+            if document_id not in self._documents_metadata:
+                return [TextContent(type="text", text=f"❌ **Document not found:** {document_id}")]
+            
+            # Create version backup if requested
+            if create_version:
+                version_data = {
+                    "content": content,
+                    "metadata": self._documents_metadata[document_id].copy(),
+                    "tags": self._document_tags[document_id].copy(),
+                    "timestamp": datetime.now().isoformat(),
+                    "version": len(self._document_versions.get(document_id, [])) + 1
+                }
+                
+                if document_id not in self._document_versions:
+                    self._document_versions[document_id] = []
+                self._document_versions[document_id].append(version_data)
+            
+            # Update content if provided
+            if content:
+                vector_store = await self._get_vector_store()
+                # Remove old document
+                await vector_store.delete_documents([document_id])
+                # Add updated document
+                updated_metadata = self._documents_metadata[document_id].copy()
+                updated_metadata["modified_at"] = datetime.now().isoformat()
+                
+                await vector_store.add_documents([Document(
+                    page_content=content,
+                    metadata=updated_metadata,
+                    id=document_id
+                )])
+            
+            # Update metadata
+            if metadata:
+                if partial_update:
+                    self._documents_metadata[document_id].update(metadata)
+                else:
+                    self._documents_metadata[document_id] = metadata
+                self._documents_metadata[document_id]["modified_at"] = datetime.now().isoformat()
+            
+            # Update tags
+            if tags is not None:
+                self._document_tags[document_id] = tags
+            
+            return [TextContent(type="text", text=f"✅ **Document updated successfully:** {document_id}")]
+            
+        except Exception as e:
+            self.logger.error(f"[{request_id}] Document update failed: {e}")
+            return [TextContent(type="text", text=f"❌ **Error updating document:** {str(e)}")]
+
+    async def _delete_document(
+        self,
+        request_id: str,
+        document_id: str,
+        soft_delete: bool = True,
+        cleanup_chunks: bool = True,
+        update_indices: bool = True,
+        backup_before_delete: bool = True,
+    ) -> List[TextContent]:
+        """Delete a document from the knowledge base."""
+        try:
+            if document_id not in self._documents_metadata:
+                return [TextContent(type="text", text=f"❌ **Document not found:** {document_id}")]
+            
+            # Create backup if requested
+            if backup_before_delete:
+                backup_data = {
+                    "metadata": self._documents_metadata[document_id].copy(),
+                    "tags": self._document_tags[document_id].copy(),
+                    "usage": self._document_usage[document_id].copy(),
+                    "deleted_at": datetime.now().isoformat()
+                }
+                
+                if document_id not in self._document_versions:
+                    self._document_versions[document_id] = []
+                self._document_versions[document_id].append(backup_data)
+            
+            if soft_delete:
+                # Mark as deleted but keep metadata
+                self._documents_metadata[document_id]["deleted"] = True
+                self._documents_metadata[document_id]["deleted_at"] = datetime.now().isoformat()
+                action = "soft deleted"
+            else:
+                # Remove from vector store and all tracking
+                if cleanup_chunks:
+                    vector_store = await self._get_vector_store()
+                    await vector_store.delete_documents([document_id])
+                
+                # Remove from all tracking dictionaries
+                del self._documents_metadata[document_id]
+                del self._document_tags[document_id]
+                del self._document_usage[document_id]
+                action = "permanently deleted"
+            
+            return [TextContent(type="text", text=f"✅ **Document {action} successfully:** {document_id}")]
+            
+        except Exception as e:
+            self.logger.error(f"[{request_id}] Document deletion failed: {e}")
+            return [TextContent(type="text", text=f"❌ **Error deleting document:** {str(e)}")]
+
+    async def _list_documents(
+        self,
+        request_id: str,
+        page: int = 1,
+        page_size: int = 20,
+        filter_metadata: Optional[Dict[str, Any]] = None,
+        filter_tags: Optional[List[str]] = None,
+        filter_type: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        sort_by: str = "date",
+        sort_order: str = "desc",
+        include_stats: bool = True,
+        include_deleted: bool = False,
+    ) -> List[TextContent]:
+        """List documents with filtering and pagination."""
+        try:
+            # Apply filters
+            filtered_docs = []
+            for doc_id, metadata in self._documents_metadata.items():
+                # Skip deleted documents unless requested
+                if metadata.get("deleted", False) and not include_deleted:
+                    continue
+                
+                # Apply metadata filters
+                if filter_metadata:
+                    if not all(metadata.get(k) == v for k, v in filter_metadata.items()):
+                        continue
+                
+                # Apply tag filters
+                if filter_tags:
+                    doc_tags = self._document_tags.get(doc_id, [])
+                    if not any(tag in doc_tags for tag in filter_tags):
+                        continue
+                
+                # Apply type filter
+                if filter_type and metadata.get("file_type") != filter_type:
+                    continue
+                
+                # Apply date filters
+                created_at = metadata.get("created_at")
+                if date_from and created_at and created_at < date_from:
+                    continue
+                if date_to and created_at and created_at > date_to:
+                    continue
+                
+                filtered_docs.append((doc_id, metadata))
+            
+            # Sort documents
+            def sort_key(item):
+                doc_id, metadata = item
+                if sort_by == "date":
+                    return metadata.get("created_at", "")
+                elif sort_by == "size":
+                    return metadata.get("content_length", 0)
+                elif sort_by == "type":
+                    return metadata.get("file_type", "")
+                elif sort_by == "name":
+                    return metadata.get("source", "")
+                elif sort_by == "usage":
+                    return self._document_usage.get(doc_id, {}).get("access_count", 0)
+                return ""
+            
+            filtered_docs.sort(key=sort_key, reverse=(sort_order == "desc"))
+            
+            # Apply pagination
+            start_idx = (page - 1) * page_size
+            end_idx = start_idx + page_size
+            page_docs = filtered_docs[start_idx:end_idx]
+            
+            # Format response
+            response_lines = [f"📋 **Document List (Page {page}/{(len(filtered_docs) + page_size - 1) // page_size})**\n"]
+            
+            if include_stats:
+                total_docs = len(self._documents_metadata)
+                deleted_docs = len([m for m in self._documents_metadata.values() if m.get("deleted", False)])
+                response_lines.append(f"**Statistics:**")
+                response_lines.append(f"• Total documents: {total_docs}")
+                response_lines.append(f"• Active documents: {total_docs - deleted_docs}")
+                response_lines.append(f"• Deleted documents: {deleted_docs}")
+                response_lines.append(f"• Filtered results: {len(filtered_docs)}\n")
+            
+            for i, (doc_id, metadata) in enumerate(page_docs, 1):
+                tags = self._document_tags.get(doc_id, [])
+                usage = self._document_usage.get(doc_id, {})
+                
+                status = "🗑️ Deleted" if metadata.get("deleted", False) else "✅ Active"
+                source = metadata.get("source", "Unknown")
+                created = metadata.get("created_at", "Unknown")[:19]  # Trim to date/time
+                
+                response_lines.append(f"**{start_idx + i}. {status} - {doc_id[:8]}...**")
+                response_lines.append(f"📂 Source: {source}")
+                response_lines.append(f"📅 Created: {created}")
+                response_lines.append(f"🏷️ Tags: {', '.join(tags) if tags else 'None'}")
+                response_lines.append(f"👁️ Views: {usage.get('access_count', 0)}")
+                response_lines.append("")
+            
+            return [TextContent(type="text", text="\n".join(response_lines))]
+            
+        except Exception as e:
+            self.logger.error(f"[{request_id}] Document listing failed: {e}")
+            return [TextContent(type="text", text=f"❌ **Error listing documents:** {str(e)}")]
+
+    async def _manage_tags(
+        self,
+        request_id: str,
+        action: str,
+        document_id: Optional[str] = None,
+        document_ids: Optional[List[str]] = None,
+        tags: Optional[List[str]] = None,
+        search_tags: Optional[List[str]] = None,
+        tag_filter: Optional[str] = None,
+    ) -> List[TextContent]:
+        """Manage document tags."""
+        try:
+            if action == "list":
+                all_tags = set()
+                for doc_tags in self._document_tags.values():
+                    all_tags.update(doc_tags)
+                
+                if tag_filter:
+                    all_tags = {tag for tag in all_tags if tag_filter.lower() in tag.lower()}
+                
+                response = f"🏷️ **Available Tags ({len(all_tags)} total):**\n\n"
+                response += "\n".join(f"• {tag}" for tag in sorted(all_tags))
+                return [TextContent(type="text", text=response)]
+            
+            elif action == "search":
+                if not search_tags:
+                    return [TextContent(type="text", text="❌ **Error:** search_tags required for search action")]
+                
+                matching_docs = []
+                for doc_id, doc_tags in self._document_tags.items():
+                    if any(tag in doc_tags for tag in search_tags):
+                        matching_docs.append(doc_id)
+                
+                response = f"🔍 **Documents with tags {search_tags}:**\n\n"
+                response += "\n".join(f"• {doc_id}" for doc_id in matching_docs)
+                return [TextContent(type="text", text=response)]
+            
+            elif action in ["add", "remove"]:
+                if not tags:
+                    return [TextContent(type="text", text=f"❌ **Error:** tags required for {action} action")]
+                
+                target_docs = []
+                if document_id:
+                    target_docs = [document_id]
+                elif document_ids:
+                    target_docs = document_ids
+                else:
+                    return [TextContent(type="text", text="❌ **Error:** document_id or document_ids required")]
+                
+                results = []
+                for doc_id in target_docs:
+                    if doc_id not in self._document_tags:
+                        results.append(f"❌ {doc_id}: Not found")
+                        continue
+                    
+                    if action == "add":
+                        for tag in tags:
+                            if tag not in self._document_tags[doc_id]:
+                                self._document_tags[doc_id].append(tag)
+                        results.append(f"✅ {doc_id}: Added tags {tags}")
+                    else:  # remove
+                        for tag in tags:
+                            if tag in self._document_tags[doc_id]:
+                                self._document_tags[doc_id].remove(tag)
+                        results.append(f"✅ {doc_id}: Removed tags {tags}")
+                
+                return [TextContent(type="text", text=f"🏷️ **Tag {action} results:**\n\n" + "\n".join(results))]
+            
+        except Exception as e:
+            self.logger.error(f"[{request_id}] Tag management failed: {e}")
+            return [TextContent(type="text", text=f"❌ **Error managing tags:** {str(e)}")]
+
+    async def _bulk_operations(
+        self,
+        request_id: str,
+        operation: str,
+        documents: List[Dict[str, Any]],
+        batch_size: int = 10,
+        continue_on_error: bool = True,
+        progress_callback: bool = True,
+    ) -> List[TextContent]:
+        """Perform bulk operations on multiple documents."""
+        try:
+            results = []
+            total = len(documents)
+            processed = 0
+            
+            for i in range(0, total, batch_size):
+                batch = documents[i:i + batch_size]
+                
+                for doc_data in batch:
+                    try:
+                        if operation == "add":
+                            result = await self._add_document(request_id, **doc_data)
+                        elif operation == "update":
+                            result = await self._update_document(request_id, **doc_data)
+                        elif operation == "delete":
+                            result = await self._delete_document(request_id, **doc_data)
+                        elif operation == "tag":
+                            result = await self._manage_tags(request_id, **doc_data)
+                        
+                        results.append(f"✅ Operation {processed + 1}: Success")
+                        processed += 1
+                        
+                    except Exception as e:
+                        error_msg = f"❌ Operation {processed + 1}: {str(e)}"
+                        results.append(error_msg)
+                        if not continue_on_error:
+                            break
+                        processed += 1
+                
+                if progress_callback:
+                    self.logger.info(f"[{request_id}] Bulk {operation}: {processed}/{total} completed")
+            
+            success_count = len([r for r in results if r.startswith("✅")])
+            failure_count = len([r for r in results if r.startswith("❌")])
+            
+            response = f"""⚡ **Bulk {operation.title()} Operation Complete**
+
+**Summary:**
+• Total operations: {total}
+• Successful: {success_count}
+• Failed: {failure_count}
+• Success rate: {success_count/total*100:.1f}%
+
+**Detailed Results:**
+{chr(10).join(results[:20])}  # Show first 20 results
+{f'... and {len(results) - 20} more' if len(results) > 20 else ''}
+"""
+            
+            return [TextContent(type="text", text=response)]
+            
+        except Exception as e:
+            self.logger.error(f"[{request_id}] Bulk operation failed: {e}")
+            return [TextContent(type="text", text=f"❌ **Error in bulk operation:** {str(e)}")]
+
+    async def _document_analytics(
+        self,
+        request_id: str,
+        document_id: Optional[str] = None,
+        analytics_type: str = "overview",
+        time_range: str = "month",
+        limit: int = 20,
+        include_charts: bool = False,
+    ) -> List[TextContent]:
+        """Get document usage analytics."""
+        try:
+            if analytics_type == "overview":
+                total_docs = len(self._documents_metadata)
+                active_docs = len([m for m in self._documents_metadata.values() if not m.get("deleted", False)])
+                total_views = sum(usage.get("access_count", 0) for usage in self._document_usage.values())
+                
+                # Get top tags
+                tag_counts = {}
+                for tags in self._document_tags.values():
+                    for tag in tags:
+                        tag_counts[tag] = tag_counts.get(tag, 0) + 1
+                
+                top_tags = sorted(tag_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+                
+                response = f"""📊 **Document Analytics Overview**
+
+**Document Statistics:**
+• Total documents: {total_docs}
+• Active documents: {active_docs}
+• Deleted documents: {total_docs - active_docs}
+• Total views: {total_views}
+• Average views per document: {total_views/max(total_docs, 1):.1f}
+
+**Top Tags:**
+{chr(10).join(f'• {tag}: {count} documents' for tag, count in top_tags)}
+
+**Recent Activity:**
+• Documents added today: {len([m for m in self._documents_metadata.values() if m.get('created_at', '').startswith(datetime.now().strftime('%Y-%m-%d'))])}
+• Documents modified today: {len([m for m in self._documents_metadata.values() if m.get('modified_at', '').startswith(datetime.now().strftime('%Y-%m-%d'))])}
+"""
+                
+            elif analytics_type == "popular":
+                # Get most accessed documents
+                popular_docs = sorted(
+                    [(doc_id, usage.get("access_count", 0)) for doc_id, usage in self._document_usage.items()],
+                    key=lambda x: x[1],
+                    reverse=True
+                )[:limit]
+                
+                response = f"📈 **Most Popular Documents (Top {limit}):**\n\n"
+                for i, (doc_id, views) in enumerate(popular_docs, 1):
+                    metadata = self._documents_metadata.get(doc_id, {})
+                    source = metadata.get("source", "Unknown")[:50]
+                    response += f"{i}. {doc_id[:8]}... - {views} views\n   📂 {source}\n\n"
+                
+            elif analytics_type == "usage" and document_id:
+                if document_id not in self._document_usage:
+                    return [TextContent(type="text", text=f"❌ **Document not found:** {document_id}")]
+                
+                usage = self._document_usage[document_id]
+                metadata = self._documents_metadata[document_id]
+                tags = self._document_tags.get(document_id, [])
+                
+                response = f"""📊 **Document Usage Analytics: {document_id}**
+
+**Metadata:**
+• Source: {metadata.get('source', 'Unknown')}
+• Created: {metadata.get('created_at', 'Unknown')}
+• Type: {metadata.get('file_type', 'Unknown')}
+• Size: {metadata.get('content_length', 'Unknown')} characters
+
+**Usage Statistics:**
+• Total views: {usage.get('access_count', 0)}
+• Last accessed: {usage.get('last_accessed', 'Never')}
+• Tags: {', '.join(tags) if tags else 'None'}
+
+**Versions:**
+• Version history: {len(self._document_versions.get(document_id, []))} versions
+"""
+            
+            else:
+                response = f"📊 **Analytics type '{analytics_type}' not yet implemented**"
+            
+            return [TextContent(type="text", text=response)]
+            
+        except Exception as e:
+            self.logger.error(f"[{request_id}] Analytics generation failed: {e}")
+            return [TextContent(type="text", text=f"❌ **Error generating analytics:** {str(e)}")]
+
+    # Search Optimization Tool Handlers
+    
+    async def _optimize_search(
+        self,
+        request_id: str,
+        query: str,
+        user_id: str = "anonymous",
+        ranking_strategy: str = "hybrid_balanced",
+        enable_personalization: bool = True,
+        enable_summarization: bool = True,
+        max_results: int = 10,
+    ) -> List[TextContent]:
+        """Optimize search results using SearchOptimizer."""
+        try:
+            # Get search optimizer
+            optimizer = await self._get_search_optimizer()
+            if not optimizer:
+                return [TextContent(type="text", text="❌ **Search optimizer not available**")]
+            
+            # First, get base search results
+            vector_store = await self._get_vector_store()
+            base_results = await vector_store.similarity_search_with_score(
+                query=query,
+                k=max_results * 2,  # Get more results for better optimization
+                include_metadata=True
+            )
+            
+            # Convert ranking strategy string to enum
+            strategy_map = {
+                "vector_only": RankingStrategy.VECTOR_ONLY,
+                "bm25_only": RankingStrategy.BM25_ONLY,
+                "hybrid_balanced": RankingStrategy.HYBRID_BALANCED,
+                "hybrid_vector_weighted": RankingStrategy.HYBRID_VECTOR_WEIGHTED,
+                "hybrid_bm25_weighted": RankingStrategy.HYBRID_BM25_WEIGHTED,
+                "personalized": RankingStrategy.PERSONALIZED,
+            }
+            strategy = strategy_map.get(ranking_strategy, RankingStrategy.HYBRID_BALANCED)
+            
+            # Optimize search results
+            optimized_results = await optimizer.optimize_search(
+                query=query,
+                user_id=user_id,
+                search_results=base_results,
+                ranking_strategy=strategy,
+                enable_personalization=enable_personalization,
+                enable_summarization=enable_summarization,
+                max_results=max_results
+            )
+            
+            # Format response
+            response_lines = [
+                f"🔍 **Optimized Search Results for '{query}'**\n",
+                f"**User:** {user_id}",
+                f"**Strategy:** {ranking_strategy}",
+                f"**Optimizations Applied:** {', '.join(optimized_results['metadata']['optimizations_applied'])}",
+                f"**Processing Time:** {optimized_results['metadata']['processing_time']:.3f}s\n",
+            ]
+            
+            # Add query analysis if available
+            if 'query_analysis' in optimized_results['metadata']:
+                analysis = optimized_results['metadata']['query_analysis']
+                response_lines.extend([
+                    f"**Query Analysis:**",
+                    f"• Type: {analysis['type']}",
+                    f"• Intent: {analysis['intent']}",
+                    f"• Complexity: {analysis['complexity']:.2f}",
+                    f"• Confidence: {analysis['confidence']:.2f}\n"
+                ])
+            
+            # Add expanded query information
+            if 'expanded_query' in optimized_results['metadata']:
+                expanded = optimized_results['metadata']['expanded_query']
+                if expanded['synonyms']:
+                    response_lines.append(f"**Query Expansion:** {len(expanded['synonyms'])} terms expanded")
+                if expanded['boost_terms']:
+                    response_lines.append(f"**Boost Terms:** {', '.join(expanded['boost_terms'])}")
+                response_lines.append("")
+            
+            # Add spelling suggestions if available
+            if 'spelling_suggestions' in optimized_results['metadata']:
+                suggestions = optimized_results['metadata']['spelling_suggestions']
+                if suggestions:
+                    response_lines.append(f"**Spelling Suggestions:** {len(suggestions)} corrections found\n")
+            
+            # Display optimized results
+            response_lines.append(f"**Results ({len(optimized_results['optimized_results'])}):**\n")
+            
+            for i, result_data in enumerate(optimized_results['optimized_results'], 1):
+                doc = result_data['document']
+                ranking_score = result_data['ranking_score']
+                summary = result_data['summary']
+                
+                # Format document info
+                source = doc.metadata.get('source', 'Unknown')[:50]
+                response_lines.extend([
+                    f"**{i}. Score: {ranking_score.final_score:.3f}**",
+                    f"📂 **Source:** {source}",
+                    f"📊 **Ranking:** Vector: {ranking_score.vector_score:.3f}, BM25: {ranking_score.bm25_score:.3f}, Personal: {ranking_score.personalization_score:.3f}",
+                ])
+                
+                # Add summary if available
+                if summary and enable_summarization:
+                    response_lines.extend([
+                        f"📄 **Summary:** {summary.summary_text[:200]}{'...' if len(summary.summary_text) > 200 else ''}",
+                        f"🎯 **Relevance:** {summary.relevance_score:.3f}",
+                    ])
+                else:
+                    # Fallback to content preview
+                    preview = doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content
+                    response_lines.append(f"📄 **Content:** {preview}")
+                
+                response_lines.append("─" * 50)
+            
+            return [TextContent(type="text", text="\n".join(response_lines))]
+            
+        except Exception as e:
+            self.logger.error(f"[{request_id}] Search optimization failed: {e}")
+            return [TextContent(type="text", text=f"❌ **Error optimizing search:** {str(e)}")]
+
+    async def _get_search_analytics(
+        self,
+        request_id: str,
+        analytics_type: str = "overview",
+        time_period: str = "week",
+        include_recommendations: bool = True,
+    ) -> List[TextContent]:
+        """Get search analytics dashboard data."""
+        try:
+            optimizer = await self._get_search_optimizer()
+            if not optimizer:
+                return [TextContent(type="text", text="❌ **Search optimizer not available**")]
+            
+            dashboard_data = optimizer.get_analytics_dashboard()
+            
+            if "error" in dashboard_data:
+                return [TextContent(type="text", text=f"❌ **Analytics error:** {dashboard_data['error']}")]
+            
+            # Format response based on analytics type
+            if analytics_type == "overview":
+                overview = dashboard_data.get('overview', {})
+                if 'no_data' in overview:
+                    return [TextContent(type="text", text="📊 **No analytics data available yet**")]
+                
+                response = f"""📊 **Search Analytics Overview**
+
+**Query Statistics:**
+• Total queries: {overview.get('total_queries', 0)}
+• Daily queries: {overview.get('daily_queries', 0)}
+• Weekly queries: {overview.get('weekly_queries', 0)}
+• Unique users: {overview.get('unique_users', 0)}
+
+**Performance Metrics:**
+• Average response time: {overview.get('avg_response_time', 0):.3f}s
+• Click-through rate: {overview.get('click_through_rate', 0):.1%}
+• Average dwell time: {overview.get('avg_dwell_time', 0):.2f}s
+• Queries per user: {overview.get('queries_per_user', 0):.2f}
+"""
+                
+            elif analytics_type == "query_analytics":
+                query_data = dashboard_data.get('query_analytics', {})
+                if 'no_data' in query_data:
+                    return [TextContent(type="text", text="📊 **No query analytics data available yet**")]
+                
+                response = f"""📊 **Query Analytics**
+
+**Query Types:**
+{chr(10).join(f'• {qtype}: {count}' for qtype, count in query_data.get('query_types', {}).items())}
+
+**Search Intents:**
+{chr(10).join(f'• {intent}: {count}' for intent, count in query_data.get('intents', {}).items())}
+
+**Performance:**
+• Average complexity: {query_data.get('avg_complexity', 0):.3f}
+• Failure rate: {query_data.get('failure_rate', 0):.1%}
+• Average query length: {query_data.get('avg_query_length', 0):.2f} words
+
+**Popular Queries:**
+{chr(10).join(f'• {query}: {count}' for query, count in query_data.get('popular_queries', [])[:5])}
+"""
+                
+            elif analytics_type == "user_behavior":
+                user_data = dashboard_data.get('user_behavior', {})
+                if 'no_data' in user_data:
+                    return [TextContent(type="text", text="📊 **No user behavior data available yet**")]
+                
+                response = f"""📊 **User Behavior Analytics**
+
+**Session Statistics:**
+• Average session length: {user_data.get('avg_session_length', 0):.2f} queries
+• Average session duration: {user_data.get('avg_session_duration', 0):.2f}s
+• Total sessions: {user_data.get('total_sessions', 0)}
+• Returning users: {user_data.get('returning_users', 0)}
+
+**Engagement Metrics:**
+• Engagement rate: {user_data.get('engagement_rate', 0):.1%}
+• Bounce rate: {user_data.get('bounce_rate', 0):.1%}
+• Average click position: {user_data.get('avg_click_position', 0):.2f}
+"""
+                
+            elif analytics_type == "performance":
+                perf_data = dashboard_data.get('performance', {})
+                if 'no_data' in perf_data:
+                    return [TextContent(type="text", text="📊 **No performance data available yet**")]
+                
+                response = f"""📊 **Performance Analytics**
+
+**Overall Performance:**
+• Success rate: {perf_data.get('success_rate', 0):.1%}
+• Average response time: {perf_data.get('avg_response_time', 0):.3f}s
+• Total operations: {perf_data.get('total_operations', 0)}
+
+**Response Time Distribution:**
+• Min: {perf_data.get('min_response_time', 0):.3f}s
+• Max: {perf_data.get('max_response_time', 0):.3f}s
+"""
+                
+            else:
+                response = f"📊 **Analytics for {analytics_type}**\n\nDetailed analytics data available. Use specific analytics type for focused insights."
+            
+            # Add recommendations if requested
+            if include_recommendations and 'recommendations' in dashboard_data:
+                recommendations = dashboard_data['recommendations']
+                if recommendations:
+                    response += f"\n\n**💡 Recommendations:**\n"
+                    for rec in recommendations[:3]:  # Show top 3
+                        priority_emoji = "🔴" if rec['priority'] == 'high' else "🟡" if rec['priority'] == 'medium' else "🟢"
+                        response += f"\n{priority_emoji} **{rec['title']}**\n{rec['description']}\n*Action:* {rec['action']}\n"
+            
+            return [TextContent(type="text", text=response)]
+            
+        except Exception as e:
+            self.logger.error(f"[{request_id}] Analytics retrieval failed: {e}")
+            return [TextContent(type="text", text=f"❌ **Error retrieving analytics:** {str(e)}")]
+
+    async def _track_user_feedback(
+        self,
+        request_id: str,
+        user_id: str,
+        query: str,
+        clicked_results: List[str] = None,
+        dwell_times: Dict[str, float] = None,
+        feedback_scores: Dict[str, int] = None,
+    ) -> List[TextContent]:
+        """Track user feedback for personalization."""
+        try:
+            optimizer = await self._get_search_optimizer()
+            if not optimizer:
+                return [TextContent(type="text", text="❌ **Search optimizer not available**")]
+            
+            clicked_results = clicked_results or []
+            dwell_times = dwell_times or {}
+            feedback_scores = feedback_scores or {}
+            
+            # Track feedback
+            optimizer.track_user_feedback(
+                user_id=user_id,
+                query=query,
+                clicked_results=clicked_results,
+                dwell_times=dwell_times,
+                feedback_scores=feedback_scores
+            )
+            
+            # Update document usage analytics
+            for doc_id in clicked_results:
+                if doc_id in self._document_usage:
+                    self._document_usage[doc_id]["access_count"] += 1
+                    self._document_usage[doc_id]["last_accessed"] = datetime.now().isoformat()
+            
+            response = f"""✅ **User Feedback Tracked**
+
+**User:** {user_id}
+**Query:** {query}
+**Clicked Results:** {len(clicked_results)}
+**Dwell Time Data:** {len(dwell_times)} documents
+**Feedback Scores:** {len(feedback_scores)} documents
+
+**Summary:**
+• Average dwell time: {sum(dwell_times.values()) / len(dwell_times):.2f}s
+• Average feedback score: {sum(feedback_scores.values()) / len(feedback_scores):.2f}
+• Personalization data updated for future searches
+"""
+            
+            return [TextContent(type="text", text=response)]
+            
+        except Exception as e:
+            self.logger.error(f"[{request_id}] Feedback tracking failed: {e}")
+            return [TextContent(type="text", text=f"❌ **Error tracking feedback:** {str(e)}")]
+
+    async def _create_ab_test(
+        self,
+        request_id: str,
+        experiment_id: str,
+        name: str,
+        description: str,
+        variant_a: Dict[str, Any],
+        variant_b: Dict[str, Any],
+        traffic_split: float = 0.5,
+        duration_days: int = 7,
+        success_metric: str = "click_through_rate",
+    ) -> List[TextContent]:
+        """Create A/B test experiment."""
+        try:
+            optimizer = await self._get_search_optimizer()
+            if not optimizer:
+                return [TextContent(type="text", text="❌ **Search optimizer not available**")]
+            
+            # Create A/B test
+            optimizer.create_ab_test(
+                experiment_id=experiment_id,
+                name=name,
+                description=description,
+                variant_a=variant_a,
+                variant_b=variant_b,
+                traffic_split=traffic_split,
+                duration_days=duration_days,
+                success_metric=success_metric
+            )
+            
+            response = f"""🧪 **A/B Test Created Successfully**
+
+**Experiment Details:**
+• ID: {experiment_id}
+• Name: {name}
+• Description: {description}
+• Duration: {duration_days} days
+• Traffic Split: {traffic_split * 100:.1f}% / {(1 - traffic_split) * 100:.1f}%
+• Success Metric: {success_metric}
+
+**Variant A (Control):**
+{chr(10).join(f'• {key}: {value}' for key, value in variant_a.items())}
+
+**Variant B (Test):**
+{chr(10).join(f'• {key}: {value}' for key, value in variant_b.items())}
+
+**Status:** Active - experiment is now running
+"""
+            
+            return [TextContent(type="text", text=response)]
+            
+        except Exception as e:
+            self.logger.error(f"[{request_id}] A/B test creation failed: {e}")
+            return [TextContent(type="text", text=f"❌ **Error creating A/B test:** {str(e)}")]
+
+    async def _get_ab_test_results(
+        self,
+        request_id: str,
+        experiment_id: str = None,
+        include_details: bool = True,
+    ) -> List[TextContent]:
+        """Get A/B test results."""
+        try:
+            optimizer = await self._get_search_optimizer()
+            if not optimizer:
+                return [TextContent(type="text", text="❌ **Search optimizer not available**")]
+            
+            results = optimizer.get_ab_test_results()
+            
+            if "error" in results:
+                return [TextContent(type="text", text=f"❌ **A/B test error:** {results['error']}")]
+            
+            if experiment_id:
+                # Get specific experiment results
+                if experiment_id in results['experiments']:
+                    exp_data = results['experiments'][experiment_id]
+                    
+                    response = f"""🧪 **A/B Test Results: {experiment_id}**
+
+**Experiment:** {exp_data['name']}
+**Status:** {exp_data['status']}
+**Duration:** {exp_data['start_date']} to {exp_data['end_date']}
+**Has Results:** {'Yes' if exp_data['has_results'] else 'No'}
+**Winner:** {exp_data['winner'] or 'No significant difference'}
+"""
+                else:
+                    response = f"❌ **Experiment not found:** {experiment_id}"
+            else:
+                # Get summary of all experiments
+                response = f"""🧪 **A/B Test Summary**
+
+**Overview:**
+• Total experiments: {results['total_experiments']}
+• Active experiments: {results['active_experiments']}
+• Completed experiments: {results['completed_experiments']}
+
+**Experiments:**
+"""
+                
+                for exp_id, exp_data in results['experiments'].items():
+                    status_emoji = "🟢" if exp_data['status'] == 'active' else "🔵" if exp_data['status'] == 'completed' else "⚪"
+                    winner_text = f" (Winner: {exp_data['winner']})" if exp_data['winner'] else ""
+                    response += f"\n{status_emoji} **{exp_id}:** {exp_data['name']}{winner_text}"
+            
+            return [TextContent(type="text", text=response)]
+            
+        except Exception as e:
+            self.logger.error(f"[{request_id}] A/B test results retrieval failed: {e}")
+            return [TextContent(type="text", text=f"❌ **Error retrieving A/B test results:** {str(e)}")]
+
     def _validate_startup_dependencies(self) -> None:
         """
         Validate startup configuration and check dependencies.
@@ -1815,7 +3395,6 @@ rag_server = RAGMCPServer()
 
 
 async def main() -> None:
-    """Main entry point for the RAG MCP Server."""
     await rag_server.run()
 
 
