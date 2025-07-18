@@ -17,6 +17,13 @@ Config Schema:
     LOG_LEVEL (str): Logging level (DEBUG, INFO, WARNING, ERROR)
     MAX_RETRIES (int): Maximum number of retry attempts
     TIMEOUT_SECONDS (int): Request timeout in seconds
+    USE_LLAMAINDEX (bool): Whether to use LlamaIndex for enhanced RAG processing
+    CHUNK_SIZE (int): Size of text chunks for document processing
+    CHUNK_OVERLAP (int): Overlap between text chunks
+    EMBEDDING_MODEL (str): OpenAI embedding model for LlamaIndex
+    SIMILARITY_TOP_K (int): Number of similar documents to retrieve
+    SIMILARITY_CUTOFF (float): Minimum similarity score for search results
+    COLLECTION_NAME (str): Name of the document collection
 """
 
 import logging
@@ -135,6 +142,66 @@ class Config:
             return value
         except ValueError as e:
             raise ConfigurationError(f"Invalid TIMEOUT_SECONDS: {e}")
+
+    # LlamaIndex Configuration
+    @property
+    def USE_LLAMAINDEX(self) -> bool:
+        """Whether to use LlamaIndex for enhanced RAG processing."""
+        return os.getenv('USE_LLAMAINDEX', 'true').lower() in ('true', '1', 'yes', 'on')
+
+    @property
+    def CHUNK_SIZE(self) -> int:
+        """Size of text chunks for document processing."""
+        try:
+            value = int(os.getenv('CHUNK_SIZE', '1024'))
+            if value <= 0:
+                raise ValueError("CHUNK_SIZE must be positive")
+            return value
+        except ValueError as e:
+            raise ConfigurationError(f"Invalid CHUNK_SIZE: {e}")
+
+    @property
+    def CHUNK_OVERLAP(self) -> int:
+        """Overlap between text chunks."""
+        try:
+            value = int(os.getenv('CHUNK_OVERLAP', '200'))
+            if value < 0:
+                raise ValueError("CHUNK_OVERLAP must be non-negative")
+            return value
+        except ValueError as e:
+            raise ConfigurationError(f"Invalid CHUNK_OVERLAP: {e}")
+
+    @property
+    def EMBEDDING_MODEL(self) -> str:
+        """OpenAI embedding model for LlamaIndex."""
+        return os.getenv('EMBEDDING_MODEL', 'text-embedding-3-small')
+
+    @property
+    def SIMILARITY_TOP_K(self) -> int:
+        """Number of similar documents to retrieve."""
+        try:
+            value = int(os.getenv('SIMILARITY_TOP_K', '10'))
+            if value <= 0:
+                raise ValueError("SIMILARITY_TOP_K must be positive")
+            return value
+        except ValueError as e:
+            raise ConfigurationError(f"Invalid SIMILARITY_TOP_K: {e}")
+
+    @property
+    def SIMILARITY_CUTOFF(self) -> float:
+        """Minimum similarity score for search results."""
+        try:
+            value = float(os.getenv('SIMILARITY_CUTOFF', '0.7'))
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"SIMILARITY_CUTOFF must be between 0.0 and 1.0, got {value}")
+            return value
+        except ValueError as e:
+            raise ConfigurationError(f"Invalid SIMILARITY_CUTOFF: {e}")
+
+    @property
+    def COLLECTION_NAME(self) -> str:
+        """Name of the document collection."""
+        return os.getenv('COLLECTION_NAME', 'rag_documents')
 
     def validate(self) -> None:
         """

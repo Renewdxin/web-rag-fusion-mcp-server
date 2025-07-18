@@ -12,6 +12,12 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "mcp>=0.9.0",
+    "llama-index>=0.10.0",
+    "llama-index-core>=0.10.0",
+    "llama-index-embeddings-openai>=0.1.0",
+    "llama-index-vector-stores-chroma>=0.1.0",
+    "llama-index-llms-openai>=0.1.0",
+    "llama-index-readers-file>=0.1.0",
     "chromadb>=0.4.15",
     "tavily-python>=0.3.0",
     "requests>=2.31.0",

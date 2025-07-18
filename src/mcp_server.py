@@ -46,8 +46,16 @@ from .web_search import (
     WebSearchManager,
     WebSearchResult,
 )
-from .document_processor import DocumentProcessor, ProcessingStats, DocumentProcessingError
+from .document_processor import DocumentProcessor, ProcessingStats
 from .search_optimizer import SearchOptimizer, RankingStrategy
+
+# LlamaIndex imports for enhanced RAG
+try:
+    from .llamaindex_processor import LlamaIndexProcessor
+    LLAMAINDEX_AVAILABLE = True
+except ImportError:
+    LLAMAINDEX_AVAILABLE = False
+    LlamaIndexProcessor = None
 
 
 class RateLimiter:
@@ -116,6 +124,10 @@ class RAGMCPServer:
 
         # Initialize vector store manager (lazy loading)
         self._vector_store: Optional[VectorStoreManager] = None
+
+        # Initialize LlamaIndex processor (lazy loading)
+        self._llamaindex_processor: Optional[LlamaIndexProcessor] = None
+        self._use_llamaindex = LLAMAINDEX_AVAILABLE and getattr(config, 'USE_LLAMAINDEX', True)
 
         # Initialize web search manager (lazy loading)
         self._web_search: Optional[WebSearchManager] = None
@@ -981,29 +993,21 @@ class RAGMCPServer:
                 async with asyncio.timeout(timeout_seconds):
                     # Pattern match on tool name to dispatch to appropriate handler
                     if name == "search_knowledge_base":
-                        result = await self._search_knowledge_base(
-                            request_id, **arguments
-                        )
+                        result = await self._search_knowledge_base(request_id, **arguments)
                     elif name == "web_search":
                         result = await self._search_web(request_id, **arguments)
                     elif name == "smart_search":
                         # Map parameters to match function signature
                         smart_search_args = {
                             "query": arguments["query"],
-                            "similarity_threshold": arguments.get(
-                                "similarity_threshold", 0.75
-                            ),
+                            "similarity_threshold": arguments.get("similarity_threshold", 0.75),
                             "local_top_k": arguments.get("local_top_k", 5),
                             "web_max_results": arguments.get("web_max_results", 5),
                             "include_sources": arguments.get("include_sources", True),
-                            "combine_strategy": arguments.get(
-                                "combine_strategy", "relevance_score"
-                            ),
+                            "combine_strategy": arguments.get("combine_strategy", "relevance_score"),
                             "min_local_results": arguments.get("min_local_results", 2),
                         }
-                        result = await self._smart_search_internal(
-                            request_id, **smart_search_args
-                        )
+                        result = await self._smart_search_internal(request_id, **smart_search_args)
                     elif name == "add_document":
                         result = await self._add_document(request_id, **arguments)
                     elif name == "update_document":
@@ -1033,16 +1037,12 @@ class RAGMCPServer:
                         self.logger.error(f"[{request_id}] {error_msg}")
                         self._update_metrics(name, time.time() - start_time, False)
                         return CallToolResult(
-                            content=[
-                                TextContent(type="text", text=f"Error: {error_msg}")
-                            ]
+                            content=[TextContent(type="text", text=f"Error: {error_msg}")]
                         )
 
                 # Success - log performance metrics
                 execution_time = time.time() - start_time
-                self.logger.info(
-                    f"[{request_id}] Tool '{name}' completed successfully in {execution_time:.3f}s"
-                )
+                self.logger.info(f"[{request_id}] Tool '{name}' completed successfully in {execution_time:.3f}s")
                 self._update_metrics(name, execution_time, True)
 
                 # Convert result to CallToolResult format
@@ -1099,6 +1099,33 @@ class RAGMCPServer:
                 self.logger.error(f"Failed to initialize vector store: {e}")
                 raise VectorStoreError(f"Vector store initialization failed: {e}")
         return self._vector_store
+
+    async def _get_llamaindex_processor(self) -> Optional[LlamaIndexProcessor]:
+        """Get or initialize LlamaIndex processor."""
+        if not self._use_llamaindex or not LLAMAINDEX_AVAILABLE:
+            return None
+            
+        if self._llamaindex_processor is None:
+            try:
+                self._llamaindex_processor = LlamaIndexProcessor(
+                    collection_name=(
+                        config.COLLECTION_NAME
+                        if hasattr(config, "COLLECTION_NAME")
+                        else "rag_documents_llamaindex"
+                    ),
+                    chunk_size=getattr(config, 'CHUNK_SIZE', 1024),
+                    chunk_overlap=getattr(config, 'CHUNK_OVERLAP', 200),
+                    embedding_model=getattr(config, 'EMBEDDING_MODEL', 'text-embedding-3-small'),
+                    similarity_top_k=getattr(config, 'SIMILARITY_TOP_K', 10),
+                    similarity_cutoff=getattr(config, 'SIMILARITY_CUTOFF', 0.7),
+                )
+                self.logger.info("LlamaIndex processor initialized successfully")
+            except Exception as e:
+                self.logger.error(f"Failed to initialize LlamaIndex processor: {e}")
+                # Fall back to traditional vector store
+                self._use_llamaindex = False
+                return None
+        return self._llamaindex_processor
 
     async def _get_web_search(self) -> WebSearchManager:
         """Get or initialize web search manager."""
@@ -1401,16 +1428,52 @@ class RAGMCPServer:
                 f"[{request_id}] Query preprocessing: {query_info['keywords']}"
             )
 
-            # Get vector store
-            vector_store = await self._get_vector_store()
-
-            # Perform similarity search
-            search_results = await vector_store.similarity_search_with_score(
-                query=query_info["processed"],
-                k=top_k,
-                filter_dict=filter_dict,
-                include_metadata=include_metadata,
-            )
+            # Try LlamaIndex processor first if available
+            llamaindex_processor = await self._get_llamaindex_processor()
+            
+            if llamaindex_processor:
+                # Use LlamaIndex for more efficient search
+                self.logger.debug(f"[{request_id}] Using LlamaIndex processor")
+                
+                # Perform search with LlamaIndex
+                nodes = await llamaindex_processor.search(
+                    query=query_info["processed"],
+                    top_k=top_k,
+                    similarity_cutoff=0.6,  # Reasonable cutoff for results
+                )
+                
+                # Convert nodes to SearchResult format for compatibility
+                search_results = []
+                for node in nodes:
+                    # Create a Document-like object
+                    doc_content = node.node.text
+                    doc_metadata = node.node.metadata or {}
+                    
+                    # Create SearchResult
+                    from .vector_store import SearchResult
+                    result = SearchResult(
+                        document=Document(
+                            page_content=doc_content,
+                            metadata=doc_metadata,
+                            id=node.node.id_ if hasattr(node.node, 'id_') else None,
+                        ),
+                        score=node.score,
+                        metadata=doc_metadata,
+                    )
+                    search_results.append(result)
+                    
+            else:
+                # Fallback to traditional vector store
+                self.logger.debug(f"[{request_id}] Using traditional vector store")
+                vector_store = await self._get_vector_store()
+                
+                # Perform similarity search
+                search_results = await vector_store.similarity_search_with_score(
+                    query=query_info["processed"],
+                    k=top_k,
+                    filter_dict=filter_dict,
+                    include_metadata=include_metadata,
+                )
 
             # Sort results
             sorted_results = self._sort_results(search_results)
@@ -1764,10 +1827,43 @@ class RAGMCPServer:
             self.logger.debug(f"[{request_id}] Step 1: Searching local knowledge base")
             local_search_start = time.time()
 
-            vector_store = await self._get_vector_store()
-            local_raw_results = await vector_store.search(
-                query=query, top_k=local_top_k, filter_dict=None
-            )
+            # Try LlamaIndex first if available
+            llamaindex_processor = await self._get_llamaindex_processor()
+            
+            if llamaindex_processor:
+                self.logger.debug(f"[{request_id}] Using LlamaIndex for smart search")
+                
+                # Use LlamaIndex for local search
+                nodes = await llamaindex_processor.search(
+                    query=query,
+                    top_k=local_top_k,
+                    similarity_cutoff=0.6,
+                )
+                
+                # Convert to SearchResult format
+                local_raw_results = []
+                for node in nodes:
+                    doc_content = node.node.text
+                    doc_metadata = node.node.metadata or {}
+                    
+                    from .vector_store import SearchResult
+                    result = SearchResult(
+                        document=Document(
+                            page_content=doc_content,
+                            metadata=doc_metadata,
+                            id=node.node.id_ if hasattr(node.node, 'id_') else None,
+                        ),
+                        score=node.score,
+                        metadata=doc_metadata,
+                    )
+                    local_raw_results.append(result)
+                    
+            else:
+                # Fallback to traditional vector store
+                vector_store = await self._get_vector_store()
+                local_raw_results = await vector_store.search(
+                    query=query, top_k=local_top_k, filter_dict=None
+                )
 
             local_search_time = time.time() - local_search_start
 

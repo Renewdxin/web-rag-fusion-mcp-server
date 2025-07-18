@@ -18,14 +18,10 @@ Architecture:
 
 import asyncio
 import hashlib
-import json
 import logging
-import pickle
-import tempfile
 import time
 import uuid
 from abc import ABC, abstractmethod
-from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -35,13 +31,10 @@ from typing import Any, Dict, List, Optional, Protocol, Tuple, Union
 # Async file operations
 try:
     import aiofiles
-    import aiosqlite
-
     ASYNC_IO_AVAILABLE = True
 except ImportError:
     ASYNC_IO_AVAILABLE = False
     aiofiles = None
-    aiosqlite = None
 
 # OpenAI imports
 try:
@@ -72,6 +65,14 @@ try:
 except ImportError:
     config = None
     ConfigurationError = Exception
+
+# LlamaIndex imports for enhanced integration
+try:
+    from .llamaindex_processor import LlamaIndexProcessor
+    LLAMAINDEX_AVAILABLE = True
+except ImportError:
+    LLAMAINDEX_AVAILABLE = False
+    LlamaIndexProcessor = None
 
 
 # Type definitions
