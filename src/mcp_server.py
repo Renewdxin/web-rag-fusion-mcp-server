@@ -1236,7 +1236,7 @@ class RAGMCPServer:
             # Add processing metadata
             metadata.update({
                 "created_at": datetime.now().isoformat(),
-                "tags": tags,
+                "tags": ",".join(tags) if tags else "",  # Convert list to comma-separated string
                 "processor": "rag_engine_direct"
             })
             

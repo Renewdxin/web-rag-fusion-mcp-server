@@ -41,13 +41,14 @@ except ImportError:
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.postprocessor import SimilarityPostprocessor
 from llama_index.core.response_synthesizers import ResponseMode
-from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.llms.openai import OpenAI
+from llama_index.llms.dashscope import DashScope
 from llama_index.vector_stores.chroma import ChromaVectorStore
 import chromadb
 from chromadb.config import Settings as ChromaSettings
 
 from config.settings import config
+from src.embedding_provider import get_embed_model_from_env, EmbeddingProviderError
 
 
 class RAGEngine:
@@ -119,39 +120,88 @@ class RAGEngine:
         self.logger.info(f"RAGEngine initialized with {len(self.documents)} documents")
     
     def _setup_settings(self, embedding_model: str, llm_model: str):
-        """Setup LlamaIndex global settings using config."""
-        # Check if OpenAI API key is available
-        if not config.OPENAI_API_KEY:
-            raise ValueError("OpenAI API key is required for RAGEngine")
+        """Setup LlamaIndex global settings using dynamic embedding provider."""
+        # Configure embedding model using the new provider system
+        try:
+            # Use the provider specified in config (with fallback to openai)
+            Settings.embed_model = get_embed_model_from_env(
+                provider_env_var="EMBED_PROVIDER",
+                fallback_provider="openai"
+            )
+            
+            # Override model if specified in constructor
+            if embedding_model != "text-embedding-3-small":  # If not default
+                # Get the current provider from config
+                provider = config.EMBED_PROVIDER
+                if provider == "dashscope":
+                    # Re-create with custom model for DashScope
+                    from src.embedding_provider import get_embed_model
+                    Settings.embed_model = get_embed_model(
+                        provider="dashscope",
+                        model=embedding_model,
+                        api_key=config.DASHSCOPE_API_KEY or config.OPENAI_API_KEY
+                    )
+                else:
+                    # Re-create with custom model for OpenAI
+                    from src.embedding_provider import get_embed_model
+                    Settings.embed_model = get_embed_model(
+                        provider="openai", 
+                        model=embedding_model,
+                        api_key=config.OPENAI_API_KEY
+                    )
+            
+            self.logger.info(f"Configured embedding provider: {config.EMBED_PROVIDER} with model: {embedding_model}")
+            
+        except EmbeddingProviderError as e:
+            raise ValueError(f"Failed to initialize embedding provider: {e}")
         
-        # Prepare OpenAI client arguments
-        openai_kwargs = {
-            "api_key": config.OPENAI_API_KEY,
-        }
-        
-        # Add base_url if configured (for proxy support)
-        if config.OPENAI_BASE_URL:
-            openai_kwargs["base_url"] = config.OPENAI_BASE_URL
-        
-        # Configure LLM
-        Settings.llm = OpenAI(
-            model=llm_model,
-            temperature=0.1,
-            **openai_kwargs
-        )
-        
-        # Configure embedding model
-        Settings.embed_model = OpenAIEmbedding(
-            model=embedding_model,
-            embed_batch_size=100,
-            **openai_kwargs
-        )
+        # Configure LLM based on provider or explicit configuration
+        try:
+            # Check if using DashScope LLM (inferred from base URL or provider)
+            is_dashscope_llm = (
+                config.OPENAI_BASE_URL and 'dashscope' in config.OPENAI_BASE_URL.lower()
+            ) or config.EMBED_PROVIDER == "dashscope"
+            
+            if is_dashscope_llm:
+                # Use DashScope LLM
+                api_key = config.DASHSCOPE_API_KEY or config.OPENAI_API_KEY
+                if not api_key:
+                    raise ValueError("DashScope API key is required for DashScope LLM")
+                
+                Settings.llm = DashScope(
+                    model_name=llm_model,
+                    api_key=api_key,
+                    temperature=0.1
+                )
+                self.logger.info(f"Configured DashScope LLM: {llm_model}")
+                
+            else:
+                # Use OpenAI LLM
+                if not config.OPENAI_API_KEY:
+                    raise ValueError("OpenAI API key is required for OpenAI LLM")
+                
+                # Prepare OpenAI client arguments
+                openai_kwargs = {
+                    "api_key": config.OPENAI_API_KEY,
+                    "model": llm_model,
+                    "temperature": 0.1,
+                }
+                
+                # Add base_url if configured (for proxy support)
+                if config.OPENAI_BASE_URL:
+                    openai_kwargs["base_url"] = config.OPENAI_BASE_URL
+                
+                Settings.llm = OpenAI(**openai_kwargs)
+                self.logger.info(f"Configured OpenAI LLM: {llm_model}")
+                
+        except Exception as e:
+            raise ValueError(f"Failed to initialize LLM: {e}")
         
         # Set chunk settings
         Settings.chunk_size = self.chunk_size
         Settings.chunk_overlap = self.chunk_overlap
         
-        self.logger.info(f"Configured LLM: {llm_model}, Embedding: {embedding_model}")
+        self.logger.info(f"RAG settings configured successfully")
     
     def _setup_chroma(self):
         """Setup ChromaDB client and vector store."""

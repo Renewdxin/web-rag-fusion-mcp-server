@@ -192,8 +192,18 @@ class Config:
 
     @property
     def EMBEDDING_MODEL(self) -> str:
-        """OpenAI embedding model for LlamaIndex."""
+        """Embedding model name (provider-specific)."""
         return os.getenv('EMBEDDING_MODEL', 'text-embedding-3-small')
+
+    @property
+    def EMBED_PROVIDER(self) -> str:
+        """Embedding provider (openai or dashscope)."""
+        return os.getenv('EMBED_PROVIDER', 'openai').lower()
+
+    @property
+    def DASHSCOPE_API_KEY(self) -> str:
+        """API key for DashScope service."""
+        return os.getenv('DASHSCOPE_API_KEY', '')
 
     @property
     def LLM_MODEL(self) -> str:

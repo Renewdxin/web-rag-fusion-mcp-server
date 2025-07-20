@@ -24,6 +24,10 @@ openai>=1.3.0
 # Exa.ai 
 exa-py>=1.11.0
 
+# LlamaIndex DashScope integration
+llama-index-embeddings-dashscope>=0.3.0
+llama-index-llms-dashscope>=0.4.1
+
 # Web search (legacy support)
 tavily-python>=0.3.0
 requests>=2.31.0
