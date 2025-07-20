@@ -151,9 +151,6 @@ USER root
 # Install development dependencies
 RUN pip install pytest pytest-asyncio pytest-mock black isort mypy flake8
 
-# Copy test files
-COPY --chown=raguser:raguser tests/ ./tests/
-
 # Switch back to raguser
 USER raguser
 
