@@ -203,6 +203,49 @@ class Config:
         """Name of the document collection."""
         return os.getenv('COLLECTION_NAME', 'rag_documents')
 
+    # System Components Configuration
+    @property
+    def ENABLE_PROMETHEUS_METRICS(self) -> bool:
+        """Whether to enable Prometheus metrics collection."""
+        return os.getenv('ENABLE_PROMETHEUS_METRICS', 'true').lower() in ('true', '1', 'yes', 'on')
+
+    @property
+    def ENABLE_RATE_LIMITING(self) -> bool:
+        """Whether to enable request rate limiting."""
+        return os.getenv('ENABLE_RATE_LIMITING', 'true').lower() in ('true', '1', 'yes', 'on')
+
+    @property
+    def RATE_LIMIT_REQUESTS(self) -> int:
+        """Maximum requests per time window for rate limiting."""
+        try:
+            value = int(os.getenv('RATE_LIMIT_REQUESTS', '100'))
+            if value <= 0:
+                raise ValueError("RATE_LIMIT_REQUESTS must be positive")
+            return value
+        except ValueError as e:
+            raise ConfigurationError(f"Invalid RATE_LIMIT_REQUESTS: {e}")
+
+    @property
+    def RATE_LIMIT_WINDOW(self) -> int:
+        """Time window in seconds for rate limiting."""
+        try:
+            value = int(os.getenv('RATE_LIMIT_WINDOW', '60'))
+            if value <= 0:
+                raise ValueError("RATE_LIMIT_WINDOW must be positive")
+            return value
+        except ValueError as e:
+            raise ConfigurationError(f"Invalid RATE_LIMIT_WINDOW: {e}")
+
+    @property
+    def USE_LOGURU(self) -> bool:
+        """Whether to use loguru for structured logging instead of standard logging."""
+        return os.getenv('USE_LOGURU', 'true').lower() in ('true', '1', 'yes', 'on')
+
+    @property
+    def ENABLE_RETRY_LOGIC(self) -> bool:
+        """Whether to enable tenacity-based retry logic for resilient operations."""
+        return os.getenv('ENABLE_RETRY_LOGIC', 'true').lower() in ('true', '1', 'yes', 'on')
+
     def validate(self) -> None:
         """
         Validate all required configuration values.
@@ -289,6 +332,13 @@ class Config:
             'LOG_LEVEL': self.LOG_LEVEL,
             'MAX_RETRIES': self.MAX_RETRIES,
             'TIMEOUT_SECONDS': self.TIMEOUT_SECONDS,
+            'USE_LLAMAINDEX': self.USE_LLAMAINDEX,
+            'ENABLE_PROMETHEUS_METRICS': self.ENABLE_PROMETHEUS_METRICS,
+            'ENABLE_RATE_LIMITING': self.ENABLE_RATE_LIMITING,
+            'RATE_LIMIT_REQUESTS': self.RATE_LIMIT_REQUESTS,
+            'RATE_LIMIT_WINDOW': self.RATE_LIMIT_WINDOW,
+            'USE_LOGURU': self.USE_LOGURU,
+            'ENABLE_RETRY_LOGIC': self.ENABLE_RETRY_LOGIC,
         }
 
     def __repr__(self) -> str:

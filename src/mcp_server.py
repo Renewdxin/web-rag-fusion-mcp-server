@@ -12,30 +12,24 @@ and startup validation for all dependencies and configurations.
 """
 
 import asyncio
-import logging
 import re
 import signal
 import sys
 import time
-import uuid
-from collections import defaultdict, deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# Production-ready libraries (must be available)
+from aiolimiter import AsyncLimiter
+# JSON Schema validation
+from jsonschema import ValidationError, validate
+from loguru import logger
 # MCP imports
 from mcp.server import Server
 from mcp.types import CallToolResult, TextContent, Tool
-
-# JSON Schema validation
-try:
-    import jsonschema
-    from jsonschema import ValidationError, validate
-
-    JSONSCHEMA_AVAILABLE = True
-except ImportError:
-    JSONSCHEMA_AVAILABLE = False
-    ValidationError = Exception
+from prometheus_client import Counter, Histogram, Gauge, CollectorRegistry, generate_latest
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 # LlamaIndex availability check
 try:
@@ -50,41 +44,8 @@ from config.tool_loader import ToolConfigLoader
 from .web_search import (
     WebSearchError,
     WebSearchManager,
-    WebSearchResult,
 )
 from .llamaindex_processor import RAGEngine
-
-
-class RateLimiter:
-    """Simple token bucket rate limiter."""
-
-    def __init__(self, max_requests: int = 100, time_window: int = 60):
-        self.max_requests = max_requests
-        self.time_window = time_window
-        self.requests = deque()
-
-    def is_allowed(self) -> bool:
-        """Check if request is allowed under rate limit."""
-        now = time.time()
-
-        # Remove old requests outside time window
-        while self.requests and self.requests[0] <= now - self.time_window:
-            self.requests.popleft()
-
-        # Check if under limit
-        if len(self.requests) < self.max_requests:
-            self.requests.append(now)
-            return True
-
-        return False
-
-    def time_until_allowed(self) -> float:
-        """Get seconds until next request is allowed."""
-        if not self.requests:
-            return 0.0
-
-        oldest_request = self.requests[0]
-        return max(0.0, self.time_window - (time.time() - oldest_request))
 
 
 class RAGMCPServer:
@@ -95,7 +56,7 @@ class RAGMCPServer:
     and web search integration via Tavily API.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize the RAG MCP Server."""
         self.server = Server("rag-agent")
         self.logger = self._setup_logging()
@@ -109,18 +70,44 @@ class RAGMCPServer:
         self._tool_schemas: Dict[str, Dict[str, Any]] = {}
 
         # Rate limiting (100 requests per minute by default)
-        self.rate_limiter = RateLimiter(
-            max_requests=config.MAX_RETRIES * 20, time_window=60  # Scale with config
-        )
+        if config.ENABLE_RATE_LIMITING:
+            self.rate_limiter = AsyncLimiter(
+                max_rate=config.RATE_LIMIT_REQUESTS, 
+                time_period=config.RATE_LIMIT_WINDOW
+            )
+        else:
+            # No rate limiting
+            self.rate_limiter = None
 
-        # Performance metrics
-        self.metrics = {
-            "total_requests": 0,
-            "successful_requests": 0,
-            "failed_requests": 0,
-            "average_response_time": 0.0,
-            "tool_usage": defaultdict(int),
-        }
+        # Performance metrics with Prometheus (if enabled)
+        if config.ENABLE_PROMETHEUS_METRICS:
+            self.registry = CollectorRegistry()
+            self.request_counter = Counter(
+                'mcp_requests_total', 
+                'Total number of MCP requests',
+                ['tool_name', 'status'],
+                registry=self.registry
+            )
+            self.request_duration = Histogram(
+                'mcp_request_duration_seconds',
+                'Duration of MCP requests',
+                ['tool_name'],
+                registry=self.registry
+            )
+            self.active_requests = Gauge(
+                'mcp_active_requests',
+                'Number of active MCP requests',
+                registry=self.registry
+            )
+        else:
+            # Fallback to simple metrics
+            self.metrics = {
+                "total_requests": 0,
+                "successful_requests": 0,
+                "failed_requests": 0,
+                "average_response_time": 0.0,
+                "tool_usage": {},
+            }
 
         # Initialize web search manager (lazy loading)
         self._web_search: Optional[WebSearchManager] = None
@@ -128,11 +115,8 @@ class RAGMCPServer:
         # Initialize RAG engine (lazy loading)
         self._rag_engine: Optional[RAGEngine] = None
 
-        # Document management storage
-        self._documents_metadata: Dict[str, Dict[str, Any]] = {}
-        self._document_tags: Dict[str, List[str]] = {}
-        self._document_usage: Dict[str, Dict[str, Any]] = {}
-        self._document_versions: Dict[str, List[Dict[str, Any]]] = {}
+        # Basic document tracking (simplified)
+        self._document_count = 0
 
         # Tool dispatch table
         self._tool_handlers = {
@@ -142,20 +126,33 @@ class RAGMCPServer:
             "add_document": self._add_document,
         }
 
-    def _setup_logging(self) -> logging.Logger:
-        """Configure comprehensive logging."""
-        logger = logging.getLogger("rag-mcp-server")
-        logger.setLevel(getattr(logging, config.LOG_LEVEL))
+    def _setup_logging(self):
+        """Configure logging using loguru or fallback to standard logging."""
+        if config.USE_LOGURU:
+            # Configure loguru
+            logger.remove()  # Remove default handler
+            logger.add(
+                sys.stderr,
+                format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level}</level> | <cyan>{name}</cyan> | {message}",
+                level=config.LOG_LEVEL,
+                colorize=True
+            )
+            return logger
+        else:
+            # Fallback to standard logging
+            import logging
+            std_logger = logging.getLogger("rag-mcp-server")
+            std_logger.setLevel(getattr(logging, config.LOG_LEVEL))
 
-        # Console handler
-        handler = logging.StreamHandler(sys.stderr)
-        formatter = logging.Formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-        )
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
+            # Console handler
+            handler = logging.StreamHandler(sys.stderr)
+            formatter = logging.Formatter(
+                "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+            )
+            handler.setFormatter(formatter)
+            std_logger.addHandler(handler)
 
-        return logger
+            return std_logger
 
     def _setup_signal_handlers(self) -> None:
         """Setup graceful shutdown handlers for SIGINT and SIGTERM."""
@@ -175,6 +172,7 @@ class RAGMCPServer:
 
     def _generate_request_id(self) -> str:
         """Generate unique request ID for tracing."""
+        import uuid
         return f"req_{uuid.uuid4().hex[:8]}"
 
     async def _validate_tool_arguments(
@@ -190,10 +188,6 @@ class RAGMCPServer:
         Raises:
             ValueError: If arguments are invalid
         """
-        if not JSONSCHEMA_AVAILABLE:
-            self.logger.warning("jsonschema not available, skipping validation")
-            return
-
         # Get tool schema from cached tools
         if tool_name not in self._tool_schemas:
             # Cache schemas on first use
@@ -214,21 +208,30 @@ class RAGMCPServer:
     def _update_metrics(
             self, tool_name: str, execution_time: float, success: bool
     ) -> None:
-        """Update performance metrics."""
-        self.metrics["total_requests"] += 1
-        self.metrics["tool_usage"][tool_name] += 1
-
-        if success:
-            self.metrics["successful_requests"] += 1
+        """Update performance metrics using Prometheus or fallback."""
+        if config.ENABLE_PROMETHEUS_METRICS:
+            # Update Prometheus metrics
+            status = "success" if success else "error"
+            self.request_counter.labels(tool_name=tool_name, status=status).inc()
+            self.request_duration.labels(tool_name=tool_name).observe(execution_time)
         else:
-            self.metrics["failed_requests"] += 1
+            # Fallback to simple metrics
+            self.metrics["total_requests"] += 1
+            if tool_name not in self.metrics["tool_usage"]:
+                self.metrics["tool_usage"][tool_name] = 0
+            self.metrics["tool_usage"][tool_name] += 1
 
-        # Update rolling average response time
-        total_requests = self.metrics["total_requests"]
-        current_avg = self.metrics["average_response_time"]
-        self.metrics["average_response_time"] = (
-                                                        current_avg * (total_requests - 1) + execution_time
-                                                ) / total_requests
+            if success:
+                self.metrics["successful_requests"] += 1
+            else:
+                self.metrics["failed_requests"] += 1
+
+            # Update rolling average response time
+            total_requests = self.metrics["total_requests"]
+            current_avg = self.metrics["average_response_time"]
+            self.metrics["average_response_time"] = (
+                                                            current_avg * (total_requests - 1) + execution_time
+                                                    ) / total_requests
 
     async def _list_tools(self) -> List[Tool]:
         """
@@ -262,14 +265,11 @@ class RAGMCPServer:
 
         try:
             # Rate limiting check
-            if not self.rate_limiter.is_allowed():
-                wait_time = self.rate_limiter.time_until_allowed()
-                error_msg = f"Rate limit exceeded. Try again in {wait_time:.1f} seconds"
-                self.logger.warning(f"[{request_id}] {error_msg}")
-                self._update_metrics(name, time.time() - start_time, False)
-                return CallToolResult(
-                    content=[TextContent(type="text", text=f"Error: {error_msg}")]
-                )
+            if self.rate_limiter:
+                async with self.rate_limiter:
+                    pass  # This will handle rate limiting automatically
+            
+            # If we got here, we're within rate limits or no rate limiting
 
             # Validate input arguments against JSON Schema
             try:
@@ -339,8 +339,13 @@ class RAGMCPServer:
             return CallToolResult(
                 content=[TextContent(type="text", text=f"Error: {error_msg}")]
             )
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        reraise=True
+    ) if config.ENABLE_RETRY_LOGIC else lambda f: f
     async def _get_web_search(self) -> WebSearchManager:
-        """Get or initialize web search manager."""
+        """Get or initialize web search manager with retry logic."""
         if self._web_search is None:
             try:
                 if not config.TAVILY_API_KEY:
@@ -352,15 +357,26 @@ class RAGMCPServer:
                     max_retries=getattr(config, "MAX_RETRIES", 3),
                     quota_limit=getattr(config, "TAVILY_QUOTA_LIMIT", None),
                 )
-                self.logger.info("Web search manager initialized successfully")
+                if config.USE_LOGURU:
+                    logger.info("Web search manager initialized successfully")
+                else:
+                    self.logger.info("Web search manager initialized successfully")
             except Exception as e:
-                self.logger.error(f"Failed to initialize web search manager: {e}")
+                if config.USE_LOGURU:
+                    logger.error(f"Failed to initialize web search manager: {e}")
+                else:
+                    self.logger.error(f"Failed to initialize web search manager: {e}")
                 raise WebSearchError(f"Web search initialization failed: {e}")
         return self._web_search
 
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        reraise=True
+    ) if config.ENABLE_RETRY_LOGIC else lambda f: f
     async def _get_rag_engine(self) -> RAGEngine:
-        """Get or initialize RAG engine."""
+        """Get or initialize RAG engine with retry logic."""
         if self._rag_engine is None:
             try:
                 if not LLAMAINDEX_AVAILABLE:
@@ -374,9 +390,15 @@ class RAGMCPServer:
                     llm_model="gpt-3.5-turbo",
                     similarity_top_k=10,
                 )
-                self.logger.info("RAG engine initialized successfully")
+                if config.USE_LOGURU:
+                    logger.info("RAG engine initialized successfully")
+                else:
+                    self.logger.info("RAG engine initialized successfully")
             except Exception as e:
-                self.logger.error(f"Failed to initialize RAG engine: {e}")
+                if config.USE_LOGURU:
+                    logger.error(f"Failed to initialize RAG engine: {e}")
+                else:
+                    self.logger.error(f"Failed to initialize RAG engine: {e}")
                 # Continue without RAG engine
                 self._rag_engine = None
         return self._rag_engine
@@ -658,7 +680,8 @@ class RAGMCPServer:
                         try:
                             path_obj = Path(source_path)
                             source_path = f"📄 {path_obj.name}"
-                        except Exception:
+                        except Exception as e:
+                            self.logger.debug(f"Error parsing source path: {e}")
                             source_path = f"📄 {source_path}"
 
                     # Get content preview
@@ -691,8 +714,9 @@ class RAGMCPServer:
 
             response_text = "\n".join(response_lines)
 
+            source_count = len(response.source_nodes) if response.source_nodes else 0
             self.logger.info(
-                f"[{request_id}] RAG search completed: {len(response.source_nodes) if response.source_nodes else 0} sources in {search_time:.3f}s"
+                f"[{request_id}] RAG search completed: {source_count} sources in {search_time:.3f}s"
             )
 
             return [TextContent(type="text", text=response_text)]
@@ -1083,7 +1107,8 @@ class RAGMCPServer:
                         if source_path != 'Unknown':
                             try:
                                 source_path = f"📄 {Path(source_path).name}"
-                            except Exception:
+                            except Exception as e:
+                                self.logger.debug(f"Error parsing source path: {e}")
                                 source_path = f"📄 {source_path}"
                         
                         content_preview = getattr(node.node, 'text', '')[:150]
@@ -1116,28 +1141,26 @@ class RAGMCPServer:
 
             final_response = "\n".join(response_lines)
 
+            local_source_count = (
+                len(local_response.source_nodes) 
+                if local_response and local_response.source_nodes 
+                else 0
+            )
             self.logger.info(
                 f"[{request_id}] Smart search completed: "
-                f"local_sources={len(local_response.source_nodes) if local_response and local_response.source_nodes else 0}, "
+                f"local_sources={local_source_count}, "
                 f"web_triggered={web_search_triggered}, confidence={confidence_level}, time={total_time:.3f}s"
             )
 
             return [TextContent(type="text", text=final_response)]
 
         except Exception as e:
-            error_msg = f"❌ **Smart search failed:** {str(e)}\n\nPlease try again or contact support if the issue persists."
+            error_msg = (
+                f"❌ **Smart search failed:** {str(e)}\n\n"
+                f"Please try again or contact support if the issue persists."
+            )
             self.logger.error(f"[{request_id}] Smart search error: {e}", exc_info=True)
             return [TextContent(type="text", text=error_msg)]
-
-
-
-
-
-
-
-
-
-
 
 
     # Document Management Tool Handlers
@@ -1179,12 +1202,11 @@ class RAGMCPServer:
             processing_time = time.time()
             
             if batch_files:
-                # Batch file processing using SimpleDirectoryReader
+                # Batch file processing
                 from llama_index.core import SimpleDirectoryReader
                 
                 for file_path in batch_files:
                     try:
-                        # Use LlamaIndex SimpleDirectoryReader for each file
                         documents = SimpleDirectoryReader(
                             input_files=[file_path],
                             exclude_hidden=True,
@@ -1192,23 +1214,15 @@ class RAGMCPServer:
                         
                         # Add metadata to each document
                         for doc in documents:
-                            doc_id = str(uuid.uuid4())
                             doc.metadata.update(metadata)
-                            doc.metadata["document_id"] = doc_id
                             doc.metadata["source"] = file_path
                         
                         # Add documents to RAGEngine
                         success = await rag_engine.add_documents(documents)
                         
                         if success:
-                            # Track document metadata
-                            for doc in documents:
-                                doc_id = doc.metadata["document_id"]
-                                self._documents_metadata[doc_id] = doc.metadata
-                                self._document_tags[doc_id] = tags
-                                self._document_usage[doc_id] = {"access_count": 0, "last_accessed": None}
-                            
                             total_docs += len(documents)
+                            self._document_count += len(documents)
                             results.append(f"✅ {Path(file_path).name}: {len(documents)} documents")
                         else:
                             results.append(f"❌ {Path(file_path).name}: Failed to add to RAG engine")
@@ -1217,7 +1231,7 @@ class RAGMCPServer:
                         results.append(f"❌ {Path(file_path).name}: {str(e)}")
                         
             elif file_path:
-                # Single file processing using SimpleDirectoryReader
+                # Single file processing
                 from llama_index.core import SimpleDirectoryReader
                 
                 try:
@@ -1228,23 +1242,15 @@ class RAGMCPServer:
                     
                     # Add metadata to each document
                     for doc in documents:
-                        doc_id = str(uuid.uuid4())
                         doc.metadata.update(metadata)
-                        doc.metadata["document_id"] = doc_id
                         doc.metadata["source"] = file_path
                     
                     # Add documents to RAGEngine
                     success = await rag_engine.add_documents(documents)
                     
                     if success:
-                        # Track document metadata
-                        for doc in documents:
-                            doc_id = doc.metadata["document_id"]
-                            self._documents_metadata[doc_id] = doc.metadata
-                            self._document_tags[doc_id] = tags
-                            self._document_usage[doc_id] = {"access_count": 0, "last_accessed": None}
-                        
                         total_docs = len(documents)
+                        self._document_count += len(documents)
                         results.append(f"✅ {Path(file_path).name}: {len(documents)} documents")
                     else:
                         results.append(f"❌ {Path(file_path).name}: Failed to add to RAG engine")
@@ -1253,14 +1259,12 @@ class RAGMCPServer:
                     results.append(f"❌ {Path(file_path).name}: {str(e)}")
                     
             elif content:
-                # Raw content processing using LlamaIndex Document
+                # Raw content processing
                 from llama_index.core import Document as LlamaDocument
                 
                 try:
-                    doc_id = str(uuid.uuid4())
                     enhanced_metadata = {
                         **metadata,
-                        "document_id": doc_id,
                         "source": "raw_content",
                         "content_length": len(content)
                     }
@@ -1269,20 +1273,15 @@ class RAGMCPServer:
                     llama_doc = LlamaDocument(
                         text=content,
                         metadata=enhanced_metadata,
-                        doc_id=doc_id
                     )
                     
                     # Add document to RAGEngine
                     success = await rag_engine.add_documents([llama_doc])
                     
                     if success:
-                        # Track document metadata
-                        self._documents_metadata[doc_id] = enhanced_metadata
-                        self._document_tags[doc_id] = tags
-                        self._document_usage[doc_id] = {"access_count": 0, "last_accessed": None}
-                        
                         total_docs = 1
-                        results.append(f"✅ Content added: {doc_id}")
+                        self._document_count += 1
+                        results.append(f"✅ Content added successfully")
                     else:
                         results.append(f"❌ Content: Failed to add to RAG engine")
                         
@@ -1292,18 +1291,22 @@ class RAGMCPServer:
             processing_time = time.time() - processing_time
             
             # Format response
+            success_count = len([r for r in results if r.startswith('✅')])
+            success_rate = (success_count / len(results) * 100) if results else 100.0
+            
             response = f"""📄 **Document Addition Complete**
 
 **Processing Summary:**
 • Documents processed: {len(results)}
 • Total documents created: {total_docs}
 • Processing time: {processing_time:.2f}s
+• Total documents in knowledge base: {self._document_count}
 
 **Results:**
 {chr(10).join(results)}
 
 **Statistics:**
-• Success rate: {len([r for r in results if r.startswith('✅')])/len(results)*100:.1f}% if results else 100.0%
+• Success rate: {success_rate:.1f}%
 • Failed: {len([r for r in results if r.startswith('❌')])}
 """
             
@@ -1313,563 +1316,20 @@ class RAGMCPServer:
             self.logger.error(f"[{request_id}] Document addition failed: {e}")
             return [TextContent(type="text", text=f"❌ **Error adding document:** {str(e)}")]
 
-    async def _update_document(
-        self,
-        request_id: str,
-        document_id: str,
-        content: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-        tags: Optional[List[str]] = None,
-        partial_update: bool = True,
-        create_version: bool = True,
-        force_update: bool = False,
-    ) -> List[TextContent]:
-        """Update an existing document."""
-        try:
-            if document_id not in self._documents_metadata:
-                return [TextContent(type="text", text=f"❌ **Document not found:** {document_id}")]
-            
-            # Create version backup if requested
-            if create_version:
-                version_data = {
-                    "content": content,
-                    "metadata": self._documents_metadata[document_id].copy(),
-                    "tags": self._document_tags[document_id].copy(),
-                    "timestamp": datetime.now().isoformat(),
-                    "version": len(self._document_versions.get(document_id, [])) + 1
-                }
-                
-                if document_id not in self._document_versions:
-                    self._document_versions[document_id] = []
-                self._document_versions[document_id].append(version_data)
-            
-            # Update content if provided
-            if content:
-                rag_engine = await self._get_rag_engine()
-                # Note: RAGEngine handles document updates internally
-                # For now, we'll track the content change in metadata
-                updated_metadata = self._documents_metadata[document_id].copy()
-                updated_metadata["modified_at"] = datetime.now().isoformat()
-                updated_metadata["content_updated"] = True
-            
-            # Update metadata
-            if metadata:
-                if partial_update:
-                    self._documents_metadata[document_id].update(metadata)
-                else:
-                    self._documents_metadata[document_id] = metadata
-                self._documents_metadata[document_id]["modified_at"] = datetime.now().isoformat()
-            
-            # Update tags
-            if tags is not None:
-                self._document_tags[document_id] = tags
-            
-            return [TextContent(type="text", text=f"✅ **Document updated successfully:** {document_id}")]
-            
-        except Exception as e:
-            self.logger.error(f"[{request_id}] Document update failed: {e}")
-            return [TextContent(type="text", text=f"❌ **Error updating document:** {str(e)}")]
-
-    async def _delete_document(
-        self,
-        request_id: str,
-        document_id: str,
-        soft_delete: bool = True,
-        cleanup_chunks: bool = True,
-        update_indices: bool = True,
-        backup_before_delete: bool = True,
-    ) -> List[TextContent]:
-        """Delete a document from the knowledge base."""
-        try:
-            if document_id not in self._documents_metadata:
-                return [TextContent(type="text", text=f"❌ **Document not found:** {document_id}")]
-            
-            # Create backup if requested
-            if backup_before_delete:
-                backup_data = {
-                    "metadata": self._documents_metadata[document_id].copy(),
-                    "tags": self._document_tags[document_id].copy(),
-                    "usage": self._document_usage[document_id].copy(),
-                    "deleted_at": datetime.now().isoformat()
-                }
-                
-                if document_id not in self._document_versions:
-                    self._document_versions[document_id] = []
-                self._document_versions[document_id].append(backup_data)
-            
-            if soft_delete:
-                # Mark as deleted but keep metadata
-                self._documents_metadata[document_id]["deleted"] = True
-                self._documents_metadata[document_id]["deleted_at"] = datetime.now().isoformat()
-                action = "soft deleted"
-            else:
-                # Remove from RAG engine and all tracking
-                if cleanup_chunks:
-                    rag_engine = await self._get_rag_engine()
-                    # Note: RAGEngine handles document deletion internally
-                    # For now, we'll just mark as deleted in metadata
-                
-                # Remove from all tracking dictionaries
-                del self._documents_metadata[document_id]
-                del self._document_tags[document_id]
-                del self._document_usage[document_id]
-                action = "permanently deleted"
-            
-            return [TextContent(type="text", text=f"✅ **Document {action} successfully:** {document_id}")]
-            
-        except Exception as e:
-            self.logger.error(f"[{request_id}] Document deletion failed: {e}")
-            return [TextContent(type="text", text=f"❌ **Error deleting document:** {str(e)}")]
-
-    async def _list_documents(
-        self,
-        request_id: str,
-        page: int = 1,
-        page_size: int = 20,
-        filter_metadata: Optional[Dict[str, Any]] = None,
-        filter_tags: Optional[List[str]] = None,
-        filter_type: Optional[str] = None,
-        date_from: Optional[str] = None,
-        date_to: Optional[str] = None,
-        sort_by: str = "date",
-        sort_order: str = "desc",
-        include_stats: bool = True,
-        include_deleted: bool = False,
-    ) -> List[TextContent]:
-        """List documents with filtering and pagination."""
-        try:
-            # Apply filters
-            filtered_docs = []
-            for doc_id, metadata in self._documents_metadata.items():
-                # Skip deleted documents unless requested
-                if metadata.get("deleted", False) and not include_deleted:
-                    continue
-                
-                # Apply metadata filters
-                if filter_metadata:
-                    if not all(metadata.get(k) == v for k, v in filter_metadata.items()):
-                        continue
-                
-                # Apply tag filters
-                if filter_tags:
-                    doc_tags = self._document_tags.get(doc_id, [])
-                    if not any(tag in doc_tags for tag in filter_tags):
-                        continue
-                
-                # Apply type filter
-                if filter_type and metadata.get("file_type") != filter_type:
-                    continue
-                
-                # Apply date filters
-                created_at = metadata.get("created_at")
-                if date_from and created_at and created_at < date_from:
-                    continue
-                if date_to and created_at and created_at > date_to:
-                    continue
-                
-                filtered_docs.append((doc_id, metadata))
-            
-            # Sort documents
-            def sort_key(item):
-                doc_id, metadata = item
-                if sort_by == "date":
-                    return metadata.get("created_at", "")
-                elif sort_by == "size":
-                    return metadata.get("content_length", 0)
-                elif sort_by == "type":
-                    return metadata.get("file_type", "")
-                elif sort_by == "name":
-                    return metadata.get("source", "")
-                elif sort_by == "usage":
-                    return self._document_usage.get(doc_id, {}).get("access_count", 0)
-                return ""
-            
-            filtered_docs.sort(key=sort_key, reverse=(sort_order == "desc"))
-            
-            # Apply pagination
-            start_idx = (page - 1) * page_size
-            end_idx = start_idx + page_size
-            page_docs = filtered_docs[start_idx:end_idx]
-            
-            # Format response
-            response_lines = [f"📋 **Document List (Page {page}/{(len(filtered_docs) + page_size - 1) // page_size})**\n"]
-            
-            if include_stats:
-                total_docs = len(self._documents_metadata)
-                deleted_docs = len([m for m in self._documents_metadata.values() if m.get("deleted", False)])
-                response_lines.append(f"**Statistics:**")
-                response_lines.append(f"• Total documents: {total_docs}")
-                response_lines.append(f"• Active documents: {total_docs - deleted_docs}")
-                response_lines.append(f"• Deleted documents: {deleted_docs}")
-                response_lines.append(f"• Filtered results: {len(filtered_docs)}\n")
-            
-            for i, (doc_id, metadata) in enumerate(page_docs, 1):
-                tags = self._document_tags.get(doc_id, [])
-                usage = self._document_usage.get(doc_id, {})
-                
-                status = "🗑️ Deleted" if metadata.get("deleted", False) else "✅ Active"
-                source = metadata.get("source", "Unknown")
-                created = metadata.get("created_at", "Unknown")[:19]  # Trim to date/time
-                
-                response_lines.append(f"**{start_idx + i}. {status} - {doc_id[:8]}...**")
-                response_lines.append(f"📂 Source: {source}")
-                response_lines.append(f"📅 Created: {created}")
-                response_lines.append(f"🏷️ Tags: {', '.join(tags) if tags else 'None'}")
-                response_lines.append(f"👁️ Views: {usage.get('access_count', 0)}")
-                response_lines.append("")
-            
-            return [TextContent(type="text", text="\n".join(response_lines))]
-            
-        except Exception as e:
-            self.logger.error(f"[{request_id}] Document listing failed: {e}")
-            return [TextContent(type="text", text=f"❌ **Error listing documents:** {str(e)}")]
-
-    async def _manage_tags(
-        self,
-        request_id: str,
-        action: str,
-        document_id: Optional[str] = None,
-        document_ids: Optional[List[str]] = None,
-        tags: Optional[List[str]] = None,
-        search_tags: Optional[List[str]] = None,
-        tag_filter: Optional[str] = None,
-    ) -> List[TextContent]:
-        """Manage document tags."""
-        try:
-            if action == "list":
-                all_tags = set()
-                for doc_tags in self._document_tags.values():
-                    all_tags.update(doc_tags)
-                
-                if tag_filter:
-                    all_tags = {tag for tag in all_tags if tag_filter.lower() in tag.lower()}
-                
-                response = f"🏷️ **Available Tags ({len(all_tags)} total):**\n\n"
-                response += "\n".join(f"• {tag}" for tag in sorted(all_tags))
-                return [TextContent(type="text", text=response)]
-            
-            elif action == "search":
-                if not search_tags:
-                    return [TextContent(type="text", text="❌ **Error:** search_tags required for search action")]
-                
-                matching_docs = []
-                for doc_id, doc_tags in self._document_tags.items():
-                    if any(tag in doc_tags for tag in search_tags):
-                        matching_docs.append(doc_id)
-                
-                response = f"🔍 **Documents with tags {search_tags}:**\n\n"
-                response += "\n".join(f"• {doc_id}" for doc_id in matching_docs)
-                return [TextContent(type="text", text=response)]
-            
-            elif action in ["add", "remove"]:
-                if not tags:
-                    return [TextContent(type="text", text=f"❌ **Error:** tags required for {action} action")]
-                
-                target_docs = []
-                if document_id:
-                    target_docs = [document_id]
-                elif document_ids:
-                    target_docs = document_ids
-                else:
-                    return [TextContent(type="text", text="❌ **Error:** document_id or document_ids required")]
-                
-                results = []
-                for doc_id in target_docs:
-                    if doc_id not in self._document_tags:
-                        results.append(f"❌ {doc_id}: Not found")
-                        continue
-                    
-                    if action == "add":
-                        for tag in tags:
-                            if tag not in self._document_tags[doc_id]:
-                                self._document_tags[doc_id].append(tag)
-                        results.append(f"✅ {doc_id}: Added tags {tags}")
-                    else:  # remove
-                        for tag in tags:
-                            if tag in self._document_tags[doc_id]:
-                                self._document_tags[doc_id].remove(tag)
-                        results.append(f"✅ {doc_id}: Removed tags {tags}")
-                
-                return [TextContent(type="text", text=f"🏷️ **Tag {action} results:**\n\n" + "\n".join(results))]
-            
-        except Exception as e:
-            self.logger.error(f"[{request_id}] Tag management failed: {e}")
-            return [TextContent(type="text", text=f"❌ **Error managing tags:** {str(e)}")]
-
-    async def _bulk_operations(
-        self,
-        request_id: str,
-        operation: str,
-        documents: List[Dict[str, Any]],
-        batch_size: int = 10,
-        continue_on_error: bool = True,
-        progress_callback: bool = True,
-    ) -> List[TextContent]:
-        """Perform bulk operations on multiple documents."""
-        try:
-            results = []
-            total = len(documents)
-            processed = 0
-            
-            for i in range(0, total, batch_size):
-                batch = documents[i:i + batch_size]
-                
-                for doc_data in batch:
-                    try:
-                        if operation == "add":
-                            result = await self._add_document(request_id, **doc_data)
-                        elif operation == "update":
-                            result = await self._update_document(request_id, **doc_data)
-                        elif operation == "delete":
-                            result = await self._delete_document(request_id, **doc_data)
-                        elif operation == "tag":
-                            result = await self._manage_tags(request_id, **doc_data)
-                        
-                        results.append(f"✅ Operation {processed + 1}: Success")
-                        processed += 1
-                        
-                    except Exception as e:
-                        error_msg = f"❌ Operation {processed + 1}: {str(e)}"
-                        results.append(error_msg)
-                        if not continue_on_error:
-                            break
-                        processed += 1
-                
-                if progress_callback:
-                    self.logger.info(f"[{request_id}] Bulk {operation}: {processed}/{total} completed")
-            
-            success_count = len([r for r in results if r.startswith("✅")])
-            failure_count = len([r for r in results if r.startswith("❌")])
-            
-            response = f"""⚡ **Bulk {operation.title()} Operation Complete**
-
-**Summary:**
-• Total operations: {total}
-• Successful: {success_count}
-• Failed: {failure_count}
-• Success rate: {success_count/total*100:.1f}%
-
-**Detailed Results:**
-{chr(10).join(results[:20])}  # Show first 20 results
-{f'... and {len(results) - 20} more' if len(results) > 20 else ''}
-"""
-            
-            return [TextContent(type="text", text=response)]
-            
-        except Exception as e:
-            self.logger.error(f"[{request_id}] Bulk operation failed: {e}")
-            return [TextContent(type="text", text=f"❌ **Error in bulk operation:** {str(e)}")]
-
-    async def _document_analytics(
-        self,
-        request_id: str,
-        document_id: Optional[str] = None,
-        analytics_type: str = "overview",
-        time_range: str = "month",
-        limit: int = 20,
-        include_charts: bool = False,
-    ) -> List[TextContent]:
-        """Get document usage analytics."""
-        try:
-            if analytics_type == "overview":
-                total_docs = len(self._documents_metadata)
-                active_docs = len([m for m in self._documents_metadata.values() if not m.get("deleted", False)])
-                total_views = sum(usage.get("access_count", 0) for usage in self._document_usage.values())
-                
-                # Get top tags
-                tag_counts = {}
-                for tags in self._document_tags.values():
-                    for tag in tags:
-                        tag_counts[tag] = tag_counts.get(tag, 0) + 1
-                
-                top_tags = sorted(tag_counts.items(), key=lambda x: x[1], reverse=True)[:5]
-                
-                response = f"""📊 **Document Analytics Overview**
-
-**Document Statistics:**
-• Total documents: {total_docs}
-• Active documents: {active_docs}
-• Deleted documents: {total_docs - active_docs}
-• Total views: {total_views}
-• Average views per document: {total_views/max(total_docs, 1):.1f}
-
-**Top Tags:**
-{chr(10).join(f'• {tag}: {count} documents' for tag, count in top_tags)}
-
-**Recent Activity:**
-• Documents added today: {len([m for m in self._documents_metadata.values() if m.get('created_at', '').startswith(datetime.now().strftime('%Y-%m-%d'))])}
-• Documents modified today: {len([m for m in self._documents_metadata.values() if m.get('modified_at', '').startswith(datetime.now().strftime('%Y-%m-%d'))])}
-"""
-                
-            elif analytics_type == "popular":
-                # Get most accessed documents
-                popular_docs = sorted(
-                    [(doc_id, usage.get("access_count", 0)) for doc_id, usage in self._document_usage.items()],
-                    key=lambda x: x[1],
-                    reverse=True
-                )[:limit]
-                
-                response = f"📈 **Most Popular Documents (Top {limit}):**\n\n"
-                for i, (doc_id, views) in enumerate(popular_docs, 1):
-                    metadata = self._documents_metadata.get(doc_id, {})
-                    source = metadata.get("source", "Unknown")[:50]
-                    response += f"{i}. {doc_id[:8]}... - {views} views\n   📂 {source}\n\n"
-                
-            elif analytics_type == "usage" and document_id:
-                if document_id not in self._document_usage:
-                    return [TextContent(type="text", text=f"❌ **Document not found:** {document_id}")]
-                
-                usage = self._document_usage[document_id]
-                metadata = self._documents_metadata[document_id]
-                tags = self._document_tags.get(document_id, [])
-                
-                response = f"""📊 **Document Usage Analytics: {document_id}**
-
-**Metadata:**
-• Source: {metadata.get('source', 'Unknown')}
-• Created: {metadata.get('created_at', 'Unknown')}
-• Type: {metadata.get('file_type', 'Unknown')}
-• Size: {metadata.get('content_length', 'Unknown')} characters
-
-**Usage Statistics:**
-• Total views: {usage.get('access_count', 0)}
-• Last accessed: {usage.get('last_accessed', 'Never')}
-• Tags: {', '.join(tags) if tags else 'None'}
-
-**Versions:**
-• Version history: {len(self._document_versions.get(document_id, []))} versions
-"""
-            
-            else:
-                response = f"📊 **Analytics type '{analytics_type}' not yet implemented**"
-            
-            return [TextContent(type="text", text=response)]
-            
-        except Exception as e:
-            self.logger.error(f"[{request_id}] Analytics generation failed: {e}")
-            return [TextContent(type="text", text=f"❌ **Error generating analytics:** {str(e)}")]
-
-    # Search Optimization Tool Handlers
-    
-    async def _optimize_search(
-        self,
-        request_id: str,
-        query: str,
-        user_id: str = "anonymous",
-        ranking_strategy: str = "hybrid_balanced",
-        enable_personalization: bool = True,
-        enable_summarization: bool = True,
-        max_results: int = 10,
-    ) -> List[TextContent]:
-        """[DEPRECATED] Redirects to search_knowledge_base with RAGEngine."""
-        
-        # Add deprecation warning
-        deprecation_warning = [
-            TextContent(
-                type="text",
-                text=(
-                    "⚠️ **DEPRECATED:** The optimize_search tool is deprecated. "
-                    "The new search_knowledge_base tool with RAGEngine automatically provides "
-                    "hybrid ranking, query optimization, and personalization.\n\n"
-                    "Redirecting your query to search_knowledge_base...\n"
-                )
-            )
-        ]
-        
-        # Prepare filter_dict for personalization
-        filter_dict = None
-        if enable_personalization and user_id != "anonymous":
-            # You could add user-specific tags here if available
-            filter_dict = {"user_id": user_id}
-        
-        # Call the new search_knowledge_base method
-        search_results = await self._search_knowledge_base(
-            request_id=request_id,
-            query=query,
-            top_k=max_results,
-            filter_dict=filter_dict,
-            include_metadata=True,
-        )
-        
-        # Combine deprecation warning with search results
-        return deprecation_warning + search_results
-
-    async def _get_search_analytics(
-        self,
-        request_id: str,
-        analytics_type: str = "overview",
-        time_period: str = "week",
-        include_recommendations: bool = True,
-    ) -> List[TextContent]:
-        """[DEPRECATED] Search analytics functionality."""
-        return [TextContent(
-            type="text", 
-            text=(
-                "⚠️ **DEPRECATED:** Search analytics functionality has been deprecated. "
-                "The SearchOptimizer has been replaced with RAGEngine, which provides "
-                "built-in search optimization without requiring separate analytics tracking. "
-                "Use the enhanced search_knowledge_base tool instead."
-            )
-        )]
-
-    async def _track_user_feedback(
-        self,
-        request_id: str,
-        user_id: str,
-        query: str,
-        clicked_results: Optional[List[str]] = None,
-        dwell_times: Optional[Dict[str, float]] = None,
-        feedback_scores: Optional[Dict[str, float]] = None,
-    ) -> List[TextContent]:
-        """[DEPRECATED] User feedback tracking functionality."""
-        return [TextContent(
-            type="text", 
-            text=(
-                "⚠️ **DEPRECATED:** User feedback tracking has been deprecated. "
-                "The SearchOptimizer has been replaced with RAGEngine, which provides "
-                "built-in search optimization without requiring manual feedback tracking. "
-                "Use the enhanced search_knowledge_base tool instead."
-            )
-        )]
-
-    async def _create_ab_test(
-        self,
-        request_id: str,
-        experiment_id: str,
-        name: str,
-        control_strategy: str = "hybrid_balanced",
-        test_strategy: str = "personalized",
-        traffic_split: float = 0.5,
-        duration_days: int = 7,
-        success_metrics: Optional[List[str]] = None,
-    ) -> List[TextContent]:
-        """[DEPRECATED] A/B testing functionality."""
-        return [TextContent(
-            type="text", 
-            text=(
-                "⚠️ **DEPRECATED:** A/B testing functionality has been deprecated. "
-                "The SearchOptimizer has been replaced with RAGEngine, which provides "
-                "optimized search results without requiring A/B testing configuration. "
-                "Use the enhanced search_knowledge_base tool instead."
-            )
-        )]
-
-    async def _get_ab_test_results(
-        self,
-        request_id: str,
-        experiment_id: str = None,
-        include_details: bool = True,
-    ) -> List[TextContent]:
-        """[DEPRECATED] A/B test results functionality."""
-        return [TextContent(
-            type="text", 
-            text=(
-                "⚠️ **DEPRECATED:** A/B test results functionality has been deprecated. "
-                "The SearchOptimizer has been replaced with RAGEngine, which provides "
-                "optimized search results without requiring A/B testing. "
-                "Use the enhanced search_knowledge_base tool instead."
-            )
-        )]
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get current metrics in a standardized format."""
+        if config.ENABLE_PROMETHEUS_METRICS:
+            # Return Prometheus metrics in text format
+            return {
+                "prometheus_metrics": generate_latest(self.registry).decode('utf-8'),
+                "format": "prometheus"
+            }
+        else:
+            # Return simple metrics
+            return {
+                "metrics": self.metrics,
+                "format": "simple"
+            }
 
     def _validate_startup_dependencies(self) -> None:
         """
@@ -1927,7 +1387,10 @@ class RAGMCPServer:
 
             # Initialize server
             async with stdio_server() as (read_stream, write_stream):
-                self.logger.info("Server started successfully, listening for MCP requests...")
+                if config.USE_LOGURU:
+                    logger.info("Server started successfully, listening for MCP requests...")
+                else:
+                    self.logger.info("Server started successfully, listening for MCP requests...")
                 
                 # Run the server until shutdown
                 await self.server.run(
@@ -1937,15 +1400,24 @@ class RAGMCPServer:
                 )
 
         except KeyboardInterrupt:
-            self.logger.info("Received shutdown signal, stopping server...")
+            if config.USE_LOGURU:
+                logger.info("Received shutdown signal, stopping server...")
+            else:
+                self.logger.info("Received shutdown signal, stopping server...")
         except Exception as e:
-            self.logger.error(f"Fatal error in server: {e}", exc_info=True)
+            if config.USE_LOGURU:
+                logger.error(f"Fatal error in server: {e}")
+            else:
+                self.logger.error(f"Fatal error in server: {e}", exc_info=True)
             raise
         finally:
             # Clean up resources
             if self._web_search:
                 await self._web_search.close()
-            self.logger.info("RAG MCP Server shutdown complete")
+            if config.USE_LOGURU:
+                logger.info("RAG MCP Server shutdown complete")
+            else:
+                self.logger.info("RAG MCP Server shutdown complete")
 
 
 # Server instance for module-level access
