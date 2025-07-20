@@ -1,151 +1,217 @@
-# RAG MCP Server
+# RAG MCP Server 
 
-RAG MCP Server is a powerful, production-ready server that enhances language models with advanced retrieval-augmented generation (RAG) capabilities. It intelligently combines semantic search across local documents with real-time web search to provide comprehensive and accurate context to your models.
+一个功能强大的Model Context Protocol (MCP)服务器，为语言模型提供检索增强生成(RAG)能力。它结合了本地知识库搜索和实时网络搜索，为你的AI助手提供全面准确的上下文信息。
 
-## Core Features
+## 🚀 核心功能
 
-- **Knowledge Base Search**: Find relevant information within your local documents.
-- **Web Search**: Get up-to-date information from the internet.
-- **Smart Search**: A hybrid approach that uses both knowledge base and web search for the most relevant results.
+- **📚 知识库搜索**: 在本地文档中快速找到相关信息
+- **🌐 网络搜索**: 获取最新的网络信息
+- **🧠 智能搜索**: 结合知识库和网络搜索的混合方法
+- **🔌 MCP兼容**: 与Claude Code、Claude Desktop等MCP客户端完美集成
 
-## Getting Started
+## 📚 文档导航
 
-### Prerequisites
+### 🚀 快速开始
+- **[快速设置指南](docs/installation/QUICKSTART.md)** - 3步快速部署 ⭐
+- **[Docker部署指南](docs/installation/docker-setup.md)** - 推荐的容器化部署
+- **[本地安装指南](docs/installation/local-setup.md)** - 开发环境设置
 
-- Python 3.9+
-- Docker (recommended for easy setup)
-- An [OpenAI API key](https://platform.openai.com/api-keys)
-- A [Tavily API key](https://tavily.com/#api)
+### 📖 使用指南  
+- **[MCP客户端集成](docs/usage/mcp-integration.md)** - Claude Code/Desktop配置
+- **[工具参考手册](docs/usage/tools-reference.md)** - 所有工具的详细说明
+- **[配置参数说明](docs/configuration/CONFIG.md)** - 完整配置选项
 
-### Installation & Running
+### 🛠️ 问题解决
+- **[常见问题解决](docs/troubleshooting/common-issues.md)** - 故障排除指南
+- **[开发者指南](docs/development/DEVELOPER_GUIDE.md)** - 开发和扩展
 
-#### Docker (Recommended)
+> 💡 **新用户建议**: 直接查看 [快速设置指南](docs/installation/QUICKSTART.md) 快速上手！
 
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/your-username/rag-mcp-server.git
-    cd rag-mcp-server
-    ```
+## 📋 前置要求
 
-2.  **Create your environment file:**
-    ```bash
-    cp .env.example .env
-    ```
-    Open the `.env` file and add your `OPENAI_API_KEY` and `TAVILY_API_KEY`.
+- Python 3.9+ 或 Docker
+- [OpenAI API Key](https://platform.openai.com/api-keys)
+- 搜索服务API Key：
+  - [Perplexity API Key](https://www.perplexity.ai/settings/api) (推荐)
+  - 或 [Exa API Key](https://exa.ai/)
 
-3.  **Build and run with Docker Compose:**
-    ```bash
-    docker-compose up --build
-    ```
-    The server will be available at `http://localhost:8000`.
+## ⚡ 快速开始
 
-#### Local Setup
+### 3步快速部署
 
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/your-username/rag-mcp-server.git
-    cd rag-mcp-server
-    ```
+1. **克隆并配置**
+   ```bash
+   git clone <your-repo-url>
+   cd rag-mcp-server
+   cp .env.example .env
+   # 编辑 .env 文件，填入你的 OpenAI 和搜索 API 密钥
+   ```
 
-2.  **Create a virtual environment and install dependencies:**
-    ```bash
-    python3 -m venv venv
-    source venv/bin/activate
-    pip install -r requirements.txt
-    ```
+2. **启动服务**
+   ```bash
+   # Docker部署 (推荐)
+   docker-compose up rag-mcp-server --build -d
+   
+   # 或本地部署
+   pip install -r requirements.txt && python src/mcp_server.py
+   ```
 
-3.  **Create your environment file:**
-    ```bash
-    cp .env.example .env
-    ```
-    Open the `.env` file and add your `OPENAI_API_KEY` and `TAVILY_API_KEY`.
+3. **集成到客户端**
+   配置Claude Code或Claude Desktop - 详见 [MCP集成指南](docs/usage/mcp-integration.md)
 
-4.  **Run the server:**
-    ```bash
-    python3 src/mcp_server.py
-    ```
-    The server will be available at `http://localhost:8000`.
+✅ **完成！** 现在你可以在Claude中使用强大的RAG功能了！
 
-## How to Use
+> 📖 **详细步骤**: 查看 [快速设置指南](docs/installation/QUICKSTART.md) 获取完整说明
 
-You can interact with the server using any HTTP client, such as `curl` or Postman. The server exposes a single `/mcp` endpoint that accepts POST requests.
+## 🔧 客户端集成
 
-### Request Format
+### 支持的客户端
+- **Claude Code** - 代码编辑器中的AI助手
+- **Claude Desktop** - 桌面应用
+- 其他MCP兼容客户端
 
-The request body should be a JSON object with the following structure:
+### 配置示例
 
+**两种配置方式任选其一:**
+
+**方式1: 使用.env文件 (推荐)**
 ```json
 {
-  "tool_name": "tool_to_use",
-  "parameters": {
-    "param1": "value1",
-    "param2": "value2"
+  "mcpServers": {
+    "rag-server": {
+      "command": "bash",
+      "args": ["-c", "cd /path/to/rag-mcp-server && source venv/bin/activate && source .env && python src/mcp_server.py"]
+    }
   }
 }
 ```
 
-### Available Tools
-
-#### 1. `search_knowledge_base`
-
-Searches for documents within your local knowledge base.
-
-**Example:**
-
-```bash
-curl -X POST http://localhost:8000/mcp \
-     -H "Content-Type: application/json" \
-     -d '{
-           "tool_name": "search_knowledge_base",
-           "parameters": {
-             "query": "What are the latest advancements in AI?",
-             "top_k": 5
-           }
-         }'
+**方式2: 直接设置环境变量**
+```json
+{
+  "mcpServers": {
+    "rag-server": {
+      "command": "bash",
+      "args": ["-c", "cd /path/to/rag-mcp-server && source venv/bin/activate && python src/mcp_server.py"],
+      "env": {
+        "OPENAI_API_KEY": "your-openai-api-key",
+        "SEARCH_API_KEY": "your-search-api-key"
+      }
+    }
+  }
+}
 ```
 
-#### 2. `web_search`
+> 💡 **说明**: `.env`文件和MCP配置中的`env`字段作用相同，选择其中一种即可！
 
-Performs a web search using the Tavily API.
+📖 **详细配置指南**: [MCP客户端集成](docs/usage/mcp-integration.md)
 
-**Example:**
+## 📖 使用方法
 
+### 🔍 可用工具
+
+1. **`search_knowledge_base`** - 搜索本地文档知识库
+   ```
+   搜索我们的API文档中关于认证的内容
+   ```
+
+2. **`web_search`** - 实时网络搜索
+   ```
+   搜索最新的Python最佳实践
+   ```
+
+3. **`smart_search`** - 智能混合搜索
+   ```
+   比较我们的技术架构与业界最佳实践
+   ```
+
+📖 **详细用法**: [工具参考手册](docs/usage/tools-reference.md)
+
+## 📁 文档管理
+
+### 添加文档
 ```bash
-curl -X POST http://localhost:8000/mcp \
-     -H "Content-Type: application/json" \
-     -d '{
-           "tool_name": "web_search",
-           "parameters": {
-             "query": "What is the weather in San Francisco?",
-             "max_results": 3
-           }
-         }'
+# 创建文档目录并添加文件
+mkdir -p documents
+cp your-documents.pdf documents/
+# 支持格式：PDF、TXT、DOCX、MD
 ```
 
-#### 3. `smart_search`
+服务器会自动检测并处理新文档！
 
-Combines both local knowledge base and web search for comprehensive results.
+## ⚙️ 配置
 
-**Example:**
-
+### 核心环境变量
 ```bash
-curl -X POST http://localhost:8000/mcp \
-     -H "Content-Type: application/json" \
-     -d '{
-           "tool_name": "smart_search",
-           "parameters": {
-             "query": "Compare our internal sales data with public market trends."
-           }
-         }'
+# 必需配置
+OPENAI_API_KEY=sk-your-key              # OpenAI API密钥
+SEARCH_API_KEY=your-search-key          # 搜索API密钥
+SEARCH_BACKEND=perplexity               # perplexity 或 exa
+
+# 可选配置
+SIMILARITY_THRESHOLD=0.75               # 搜索相似度阈值
+LOG_LEVEL=INFO                          # 日志级别
+ENVIRONMENT=prod                        # 运行环境
 ```
 
-## Configuration
+📖 **完整配置**: [配置参数说明](docs/configuration/CONFIG.md)
 
-The server is configured through the `.env` file. Here are some of the key settings:
+## 🛠️ 故障排除
 
-- `OPENAI_API_KEY`: **(Required)** Your OpenAI API key for document embeddings.
-- `TAVILY_API_KEY`: **(Required)** Your Tavily API key for web search.
-- `VECTOR_STORE_PATH`: The local directory where your knowledge base vectors are stored. Defaults to `./vector_store`.
-- `LOG_LEVEL`: The logging level for the server. Defaults to `INFO`.
+### 快速检查
+```bash
+# 验证API密钥
+cat .env | grep API_KEY
 
-For more advanced configuration options, see the `config/settings.py` file.
+# 查看服务日志
+docker-compose logs rag-mcp-server
+
+# 检查文档加载
+ls -la documents/
+```
+
+### 常见问题
+- **无法启动**: 检查API密钥配置
+- **搜索无结果**: 降低相似度阈值 (`SIMILARITY_THRESHOLD=0.5`)
+- **MCP连接失败**: 验证配置文件路径和格式
+
+🔧 **详细解决方案**: [常见问题解决](docs/troubleshooting/common-issues.md)
+
+## 🔒 安全与维护
+
+### 安全要点
+- 保护API密钥，不要提交到版本控制
+- 定期轮换密钥
+- 监控使用日志
+
+### 数据备份
+```bash
+# 备份向量数据库
+docker run --rm -v mcp_rag_data:/data -v $(pwd):/backup \
+  alpine tar czf /backup/rag_backup.tar.gz -C /data .
+```
+
+### 监控
+```bash
+# 启用监控面板
+docker-compose --profile monitoring up
+# 访问 http://localhost:3000 (Grafana)
+```
+
+## 🤝 支持与贡献
+
+### 获取帮助
+- 📖 查看[完整文档](docs/README.md)
+- 🐛 [报告问题](https://github.com/your-repo/issues)
+- 💬 参与讨论和改进
+
+### 贡献代码
+欢迎提交Pull Request！请先阅读[开发者指南](docs/development/DEVELOPER_GUIDE.md)。
+
+## 📄 许可证
+
+MIT License - 详见[LICENSE](LICENSE)文件
+
+---
+
+⭐ **喜欢这个项目？** 给个Star支持一下！

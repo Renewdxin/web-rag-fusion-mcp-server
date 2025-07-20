@@ -196,6 +196,11 @@ class Config:
         return os.getenv('EMBEDDING_MODEL', 'text-embedding-3-small')
 
     @property
+    def LLM_MODEL(self) -> str:
+        """OpenAI LLM model for text generation."""
+        return os.getenv('LLM_MODEL', 'gpt-4o-mini')
+
+    @property
     def SIMILARITY_TOP_K(self) -> int:
         """Number of similar documents to retrieve."""
         try:

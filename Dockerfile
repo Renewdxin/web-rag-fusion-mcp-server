@@ -1,4 +1,4 @@
-# Multi-stage Docker build for RAG MCP Server
+# Simplified Docker build for RAG MCP Server
 FROM python:3.12-slim as builder
 
 # Set build arguments
@@ -12,12 +12,21 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Install system dependencies
+# Set Chinese mirror proxies for faster package installation
+ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple/ \
+    PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+
+# Configure APT to use Chinese mirrors for faster package downloads
+RUN sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list.d/debian.sources
+
+# Install minimal system dependencies including build tools
 RUN apt-get update && apt-get install -y \
-    build-essential \
     curl \
-    git \
-    && rm -rf /var/lib/apt/lists/*
+    gcc \
+    g++ \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
 
 # Create app directory
 WORKDIR /app
@@ -58,6 +67,9 @@ ENV PYTHONUNBUFFERED=1 \
     COLLECTION_NAME=rag_documents \
     SIMILARITY_THRESHOLD=0.75
 
+# Configure APT to use Chinese mirrors for production stage
+RUN sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list.d/debian.sources
+
 # Install runtime system dependencies
 RUN apt-get update && apt-get install -y \
     curl \
@@ -87,12 +99,12 @@ RUN cat > /app/entrypoint.sh << 'EOF'
 #!/bin/bash
 set -e
 
-# Function to log with timestamp
+# Function to log with timestamp to stderr
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1"
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1" >&2
 }
 
-# Health check function
+# Health check function - redirect output to stderr
 health_check() {
     python -c "
 import sys
@@ -100,14 +112,14 @@ sys.path.insert(0, '/app')
 try:
     from config.settings import config
     config.validate()
-    print('✅ Configuration validation passed')
+    print('Configuration validation passed', file=sys.stderr)
 except Exception as e:
-    print(f'❌ Configuration validation failed: {e}')
+    print(f'Configuration validation failed: {e}', file=sys.stderr)
     sys.exit(1)
 "
 }
 
-# Initialize application
+# Initialize application - all logs to stderr
 log "🚀 Starting RAG MCP Server..."
 log "Environment: ${ENVIRONMENT}"
 log "Log Level: ${LOG_LEVEL}"
@@ -119,8 +131,8 @@ log "🔧 Validating configuration..."
 health_check
 
 # Ensure data directory exists with proper permissions
-mkdir -p "${VECTOR_STORE_PATH}"
-chown raguser:raguser "${VECTOR_STORE_PATH}"
+mkdir -p "${VECTOR_STORE_PATH}" 2>&1
+chown raguser:raguser "${VECTOR_STORE_PATH}" 2>&1
 
 # Start the server
 log "🌟 Launching MCP server..."

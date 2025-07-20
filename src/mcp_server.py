@@ -41,11 +41,11 @@ except ImportError:
 # Local imports
 from config.settings import ConfigurationError, config
 from config.tool_loader import ToolConfigLoader
-from .web_search import (
+from src.web_search import (
     WebSearchError,
     WebSearchManager,
 )
-from .llamaindex_processor import RAGEngine
+from src.llamaindex_processor import RAGEngine
 
 
 class RAGMCPServer:
@@ -167,8 +167,26 @@ class RAGMCPServer:
 
     def _register_handlers(self) -> None:
         """Register MCP server handlers."""
-        self.server.list_tools = self._list_tools
-        self.server.call_tool = self._call_tool
+        # Register proper MCP protocol handlers
+        @self.server.list_tools()
+        async def handle_list_tools() -> List[Tool]:
+            return await self._list_tools()
+        
+        @self.server.call_tool()
+        async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> CallToolResult:
+            result = await self._call_tool(name, arguments)
+            # Make sure we're returning the CallToolResult properly
+            self.logger.debug(f"Call tool result type: {type(result)}")
+            return result
+        
+        # Register resource and prompt handlers (empty for now)
+        @self.server.list_resources()
+        async def handle_list_resources():
+            return []
+            
+        @self.server.list_prompts()
+        async def handle_list_prompts():
+            return []
 
     def _generate_request_id(self) -> str:
         """Generate unique request ID for tracing."""
@@ -309,17 +327,42 @@ class RAGMCPServer:
                 self._update_metrics(name, execution_time, True)
 
                 # Convert result to CallToolResult format
+                self.logger.debug(f"[{request_id}] Result type: {type(result)}")
+                
                 if isinstance(result, list):
-                    # Assume it's already List[TextContent]
-                    return CallToolResult(content=result)
+                    # Check if it's already List[TextContent]
+                    if result and hasattr(result[0], 'type') and result[0].type == 'text':
+                        self.logger.debug(f"[{request_id}] Result is List[TextContent]")
+                        call_result = CallToolResult(content=result)
+                        self.logger.debug(f"[{request_id}] Created CallToolResult successfully")
+                        return call_result
+                    else:
+                        # Convert to TextContent format
+                        self.logger.debug(f"[{request_id}] Converting list to TextContent format")
+                        content = []
+                        for item in result:
+                            if hasattr(item, 'text'):
+                                content.append(TextContent(type="text", text=str(item.text)))
+                            else:
+                                content.append(TextContent(type="text", text=str(item)))
+                        call_result = CallToolResult(content=content)
+                        return call_result
                 elif isinstance(result, str):
-                    return CallToolResult(
+                    call_result = CallToolResult(
                         content=[TextContent(type="text", text=result)]
                     )
+                    return call_result
+                elif hasattr(result, 'text'):
+                    # Handle single TextContent object
+                    call_result = CallToolResult(
+                        content=[TextContent(type="text", text=str(result.text))]
+                    )
+                    return call_result
                 else:
-                    return CallToolResult(
+                    call_result = CallToolResult(
                         content=[TextContent(type="text", text=str(result))]
                     )
+                    return call_result
 
             except asyncio.TimeoutError:
                 execution_time = time.time() - start_time
@@ -383,17 +426,17 @@ class RAGMCPServer:
                     raise ImportError("LlamaIndex is not available")
                 
                 self._rag_engine = RAGEngine(
-                    collection_name="rag_documents",
-                    chunk_size=1024,
-                    chunk_overlap=200,
-                    embedding_model="text-embedding-3-small",
-                    llm_model="gpt-3.5-turbo",
-                    similarity_top_k=10,
+                    collection_name=config.COLLECTION_NAME,
+                    chunk_size=config.CHUNK_SIZE,
+                    chunk_overlap=config.CHUNK_OVERLAP,
+                    embedding_model=config.EMBEDDING_MODEL,
+                    llm_model=config.LLM_MODEL,
+                    similarity_top_k=config.SIMILARITY_TOP_K,
                 )
                 if config.USE_LOGURU:
-                    logger.info("RAG engine initialized successfully")
+                    logger.info(f"RAG engine initialized successfully with LLM: {config.LLM_MODEL}, Embedding: {config.EMBEDDING_MODEL}")
                 else:
-                    self.logger.info("RAG engine initialized successfully")
+                    self.logger.info(f"RAG engine initialized successfully with LLM: {config.LLM_MODEL}, Embedding: {config.EMBEDDING_MODEL}")
             except Exception as e:
                 if config.USE_LOGURU:
                     logger.error(f"Failed to initialize RAG engine: {e}")

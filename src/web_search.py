@@ -79,8 +79,14 @@ class PerplexityBackend(SearchBackend):
         self.logger = logging.getLogger(f"{__name__}.PerplexityBackend")
         
         if config.SEARCH_BACKEND == 'perplexity':
-            self.client = PerplexityClient(api_key=api_key)
-            self.use_perplexipy = True
+            try:
+                # Try with api_key parameter first
+                self.client = PerplexityClient(api_key=api_key)
+                self.use_perplexipy = True
+            except TypeError:
+                # If api_key parameter not supported, try without it
+                self.client = PerplexityClient()
+                self.use_perplexipy = True
         else:
             # Use OpenAI client with Perplexity endpoint
             base_url = config.SEARCH_BASE_URL or "https://api.perplexity.ai"
