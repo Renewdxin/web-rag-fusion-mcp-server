@@ -110,7 +110,7 @@ class Config:
     def SIMILARITY_THRESHOLD(self) -> float:
         """Threshold for similarity matching (0.0-1.0)."""
         try:
-            value = float(os.getenv('SIMILARITY_THRESHOLD', '0.8'))
+            value = float(os.getenv('SIMILARITY_THRESHOLD', '0.75'))
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"SIMILARITY_THRESHOLD must be between 0.0 and 1.0, got {value}")
             return value
