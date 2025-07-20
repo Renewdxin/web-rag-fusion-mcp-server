@@ -1,0 +1,28 @@
+# Global owners for all files
+* @Renewdxin
+
+# Core source code - requires review from repository owner
+/src/ @Renewdxin
+/config/ @Renewdxin
+
+# Documentation - repository owner approval required
+*.md @Renewdxin
+README*.md @Renewdxin
+CHANGELOG.md @Renewdxin
+RELEASE_NOTES.md @Renewdxin
+
+# Configuration and infrastructure
+.github/ @Renewdxin
+docker-compose.yml @Renewdxin
+Dockerfile @Renewdxin
+requirements.txt @Renewdxin
+.env.example @Renewdxin
+.gitignore @Renewdxin
+
+# Version and license files
+VERSION @Renewdxin
+LICENSE @Renewdxin
+
+# Python package configuration
+pyproject.toml @Renewdxin
+setup.py @Renewdxin
