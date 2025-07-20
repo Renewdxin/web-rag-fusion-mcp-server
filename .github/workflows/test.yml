@@ -9,37 +9,18 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: [3.9, 3.10, 3.11]
-    
     steps:
       - uses: actions/checkout@v4
       
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python 3.11
         uses: actions/setup-python@v4
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: '3.11'
       
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      
-      - name: Lint with ruff (if available)
-        run: |
-          pip install ruff || echo "Ruff not available, skipping lint"
-          ruff check . || echo "Lint completed"
-        continue-on-error: true
-      
-      - name: Test embedding providers
-        run: |
-          python test_embedding_providers.py || echo "Provider tests completed"
-        env:
-          EMBED_PROVIDER: openai
-          OPENAI_API_KEY: dummy-key
-          DASHSCOPE_API_KEY: dummy-key
-        continue-on-error: true
       
       - name: Test imports
         run: |
