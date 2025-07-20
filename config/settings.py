@@ -65,6 +65,14 @@ class Config:
             self._load_environment()
             self._initialized = True
 
+    @property
+    def SEARCH_BACKEND(self) -> Literal['perplexity', 'exa']:
+        """The search backend to use."""
+        backend = os.getenv('SEARCH_BACKEND', 'perplexity').lower()
+        if backend not in ('perplexity', 'exa'):
+            raise ConfigurationError(f"SEARCH_BACKEND must be one of 'perplexity', 'exa', got '{backend}'")
+        return backend # type: ignore
+
     def _load_environment(self) -> None:
         """Load environment variables from .env file if available."""
         if load_dotenv is not None:
@@ -92,6 +100,11 @@ class Config:
         """API key for OpenAI service."""
         value = os.getenv('OPENAI_API_KEY', '')
         return value
+
+    @property
+    def OPENAI_BASE_URL(self) -> Optional[str]:
+        """Base URL for OpenAI API (for proxy or alternative endpoints)."""
+        return os.getenv('OPENAI_BASE_URL', None)
 
     @property
     def SIMILARITY_THRESHOLD(self) -> float:
@@ -327,6 +340,7 @@ class Config:
             'VECTOR_STORE_PATH': self.VECTOR_STORE_PATH,
             'TAVILY_API_KEY': '***' if self.TAVILY_API_KEY else '',
             'OPENAI_API_KEY': '***' if self.OPENAI_API_KEY else '',
+            'OPENAI_BASE_URL': self.OPENAI_BASE_URL,
             'SIMILARITY_THRESHOLD': self.SIMILARITY_THRESHOLD,
             'ENVIRONMENT': self.ENVIRONMENT,
             'LOG_LEVEL': self.LOG_LEVEL,

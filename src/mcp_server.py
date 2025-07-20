@@ -1379,11 +1379,7 @@ class RAGMCPServer:
             self._validate_startup_dependencies()
 
             # Create stdio transport and server
-            try:
-                from mcp.server.stdio import stdio_server
-            except ImportError:
-                # Fallback for different MCP versions
-                from mcp.server import serve_stdio as stdio_server
+            from mcp.server.stdio import stdio_server
 
             # Initialize server
             async with stdio_server() as (read_stream, write_stream):

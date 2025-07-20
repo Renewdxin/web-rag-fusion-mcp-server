@@ -124,18 +124,27 @@ class RAGEngine:
         if not config.OPENAI_API_KEY:
             raise ValueError("OpenAI API key is required for RAGEngine")
         
+        # Prepare OpenAI client arguments
+        openai_kwargs = {
+            "api_key": config.OPENAI_API_KEY,
+        }
+        
+        # Add base_url if configured (for proxy support)
+        if config.OPENAI_BASE_URL:
+            openai_kwargs["base_url"] = config.OPENAI_BASE_URL
+        
         # Configure LLM
         Settings.llm = OpenAI(
             model=llm_model,
-            api_key=config.OPENAI_API_KEY,
             temperature=0.1,
+            **openai_kwargs
         )
         
         # Configure embedding model
         Settings.embed_model = OpenAIEmbedding(
             model=embedding_model,
-            api_key=config.OPENAI_API_KEY,
             embed_batch_size=100,
+            **openai_kwargs
         )
         
         # Set chunk settings

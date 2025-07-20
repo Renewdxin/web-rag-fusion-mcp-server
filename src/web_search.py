@@ -23,26 +23,11 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Union
 
-# Perplexity support
-try:
-    from perplexipy import PerplexityClient
-    PERPLEXITY_AVAILABLE = True
-except ImportError:
-    try:
-        # Alternative: OpenAI-compatible client for Perplexity
-        from openai import OpenAI
-        OPENAI_AVAILABLE = True
-        PERPLEXITY_AVAILABLE = False
-    except ImportError:
-        OPENAI_AVAILABLE = False
-        PERPLEXITY_AVAILABLE = False
+from perplexipy import PerplexityClient
+from openai import OpenAI
+from exa_py import Exa
 
-# Exa.ai support  
-try:
-    from exa_py import Exa
-    EXA_AVAILABLE = True
-except ImportError:
-    EXA_AVAILABLE = False
+from config.settings import config
 
 
 @dataclass
@@ -89,24 +74,20 @@ class PerplexityBackend(SearchBackend):
     def __init__(self, api_key: str):
         if not api_key:
             raise ValueError("Perplexity API key is required")
-        if not PERPLEXITY_AVAILABLE and not OPENAI_AVAILABLE:
-            raise ImportError("Neither perplexipy nor openai is available. Install with: pip install perplexipy")
             
         self.api_key = api_key
         self.logger = logging.getLogger(f"{__name__}.PerplexityBackend")
         
-        if PERPLEXITY_AVAILABLE:
+        if config.SEARCH_BACKEND == 'perplexity':
             self.client = PerplexityClient(api_key=api_key)
             self.use_perplexipy = True
-        elif OPENAI_AVAILABLE:
+        else:
             # Use OpenAI client with Perplexity endpoint
             self.client = OpenAI(
                 api_key=api_key,
                 base_url="https://api.perplexity.ai"
             )
             self.use_perplexipy = False
-        else:
-            raise ImportError("No suitable Perplexity client available")
     
     async def search(
         self, 
@@ -185,7 +166,7 @@ class PerplexityBackend(SearchBackend):
             }
             
             return search_results, metadata
-            
+
         except Exception as e:
             self.logger.error(f"Perplexity search error: {e}")
             return [], {
@@ -210,8 +191,6 @@ class ExaBackend(SearchBackend):
     def __init__(self, api_key: str):
         if not api_key:
             raise ValueError("Exa API key is required")
-        if not EXA_AVAILABLE:
-            raise ImportError("exa-py not available. Install with: pip install exa-py")
             
         self.api_key = api_key
         self.client = Exa(api_key=api_key)
@@ -286,7 +265,7 @@ class ExaBackend(SearchBackend):
             }
             
             return search_results, metadata
-            
+
         except Exception as e:
             self.logger.error(f"Exa search error: {e}")
             return [], {
@@ -307,48 +286,46 @@ class WebSearchManager:
     
     Clean interface for AI search services with automatic library detection.
     """
-    
+
     def __init__(
-        self,
-        api_key: str,
-        backend: str = "perplexity",
-        timeout: int = 30,
-        max_retries: int = 3,
-        quota_limit: Optional[int] = None,
+            self,
+            api_key: str,
+            timeout: int = 30,
+            max_retries: int = 3,
+            quota_limit: Optional[int] = None,
         **backend_config
     ):
         """
         Initialize with specified backend.
-        
+
         Args:
             api_key: API key for the backend service
-            backend: Backend type ("perplexity", "exa")
             timeout: Request timeout (for compatibility)
             max_retries: Maximum retry attempts (for compatibility)
             quota_limit: API quota limit (for compatibility)
             backend_config: Additional backend configuration
         """
         self.logger = logging.getLogger(f"{__name__}.WebSearchManager")
-        
+
         # Create backend
-        if backend == "perplexity":
+        if config.SEARCH_BACKEND == "perplexity":
             self.backend = PerplexityBackend(api_key=api_key)
-        elif backend == "exa":
+        elif config.SEARCH_BACKEND == "exa":
             self.backend = ExaBackend(api_key=api_key)
         else:
-            raise ValueError(f"Unknown backend type: {backend}. Supported: perplexity, exa")
+            raise ValueError(f"Unknown backend type: {config.SEARCH_BACKEND}. Supported: perplexity, exa")
         
-        self.logger.info(f"Initialized with {backend} backend using official library")
-    
+        self.logger.info(f"Initialized with {config.SEARCH_BACKEND} backend using official library")
+
     async def search(
-        self,
-        query: str,
-        max_results: int = 5,
+            self,
+            query: str,
+            max_results: int = 5,
         **kwargs
     ) -> tuple[List[SearchResult], Dict[str, Any]]:
         """
         Perform search using the configured backend.
-        
+
         Returns:
             Tuple of (search_results, metadata)
         """
@@ -366,14 +343,14 @@ class WebSearchManager:
             
             self.logger.info(f"Search completed: {len(results)} results")
             return results, metadata
-            
+
         except Exception as e:
             self.logger.error(f"Search failed: {e}")
             return [], {
                 "error": str(e),
                 "error_type": "SearchManagerError"
-            }
-    
+        }
+
     async def close(self) -> None:
         """Close and cleanup resources."""
         if self.backend:
@@ -389,7 +366,6 @@ class WebSearchError(Exception):
 
 # Factory function for easy initialization
 def create_search_manager(
-    backend: str = "perplexity",
     api_key: Optional[str] = None,
     **config
 ) -> WebSearchManager:
@@ -398,11 +374,11 @@ def create_search_manager(
     
     Examples:
         # Perplexity AI (Default - Best for research & comprehensive answers)
-        manager = create_search_manager("perplexity", api_key="your_key")
+        manager = create_search_manager(api_key="your_key")
         
         # Exa.ai (Best for semantic search & AI-optimized content)
-        manager = create_search_manager("exa", api_key="your_key")
+        manager = create_search_manager(api_key="your_key")
     """
     if not api_key:
         raise ValueError("API key is required")
-    return WebSearchManager(api_key=api_key, backend=backend, **config) 
+    return WebSearchManager(api_key=api_key, **config)
