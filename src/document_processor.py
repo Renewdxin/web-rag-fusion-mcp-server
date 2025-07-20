@@ -1,8 +1,8 @@
 """
-Simplified Document Processor for RAG applications.
+Simplified Document Processor using LlamaIndex SimpleDirectoryReader.
 
-This module provides backward compatibility while delegating heavy processing
-to LlamaIndex for better performance and features.
+This module provides a streamlined interface that directly uses LlamaIndex's
+SimpleDirectoryReader for optimal document processing.
 """
 
 import asyncio
@@ -12,17 +12,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol
 
-# Local imports
-try:
-    from .vector_store import Document
-except ImportError:
+# LlamaIndex imports
+from llama_index.core import SimpleDirectoryReader
 
-    @dataclass
-    class Document:
-        page_content: str
-        metadata: Dict[str, Any] = field(default_factory=dict)
-        id: Optional[str] = None
-        content_hash: Optional[str] = None
+
+# Compatibility layer for legacy Document format
+@dataclass
+class Document:
+    page_content: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    id: Optional[str] = None
+    content_hash: Optional[str] = None
 
 
 class ProgressCallback(Protocol):
@@ -75,10 +75,10 @@ class ContentValidationError(DocumentProcessingError):
 
 class DocumentProcessor:
     """
-    Document processor that uses LlamaIndex for enhanced processing.
+    Simplified document processor using LlamaIndex SimpleDirectoryReader.
 
-    This class provides backward compatibility while leveraging LlamaIndex
-    for superior document processing capabilities.
+    This class provides a streamlined interface for document processing,
+    delegating all heavy lifting to LlamaIndex's built-in capabilities.
     """
 
     def __init__(
@@ -98,28 +98,9 @@ class DocumentProcessor:
         self.logger = logging.getLogger(f"{__name__}.DocumentProcessor")
         self.semaphore = asyncio.Semaphore(max_concurrency)
 
-        # Initialize LlamaIndex processor if available
-        self._llamaindex_processor = None
-        self._initialize_llamaindex()
-
-    def _initialize_llamaindex(self):
-        """Initialize LlamaIndex processor if available."""
-        try:
-            from .llamaindex_processor import LlamaIndexProcessor
-
-            self._llamaindex_processor = LlamaIndexProcessor(
-                chunk_size=self.chunk_size,
-                chunk_overlap=self.overlap,
-            )
-            self.logger.info("Using LlamaIndex for document processing")
-        except ImportError:
-            self.logger.warning("LlamaIndex not available, using fallback processing")
-
     def get_supported_formats(self) -> List[str]:
-        """Get list of supported file formats."""
-        if self._llamaindex_processor:
-            return [".pdf", ".txt", ".md", ".docx", ".html", ".htm"]
-        return [".txt", ".md"]
+        """Get list of supported file formats (LlamaIndex SimpleDirectoryReader)."""
+        return [".pdf", ".txt", ".md", ".docx", ".html", ".htm", ".csv", ".json", ".xml"]
 
     def can_process(self, file_path: Path) -> bool:
         """Check if file can be processed."""
@@ -131,7 +112,7 @@ class DocumentProcessor:
         preserve_paragraphs: bool = True,
         custom_metadata: Optional[Dict[str, Any]] = None,
     ) -> List[ProcessedDocument]:
-        """Process single file into chunks."""
+        """Process single file using LlamaIndex SimpleDirectoryReader."""
         async with self.semaphore:
             try:
                 if not self.can_process(file_path):
@@ -139,12 +120,7 @@ class DocumentProcessor:
                         f"Unsupported format: {file_path.suffix}"
                     )
 
-                if self._llamaindex_processor:
-                    return await self._process_with_llamaindex(
-                        file_path, custom_metadata
-                    )
-                else:
-                    return await self._process_fallback(file_path, custom_metadata)
+                return await self._process_with_llamaindex(file_path, custom_metadata)
 
             except Exception as e:
                 self.logger.error(f"Failed to process {file_path}: {e}")
@@ -155,10 +131,14 @@ class DocumentProcessor:
         file_path: Path,
         custom_metadata: Optional[Dict[str, Any]] = None,
     ) -> List[ProcessedDocument]:
-        """Process file using LlamaIndex."""
+        """Process file using LlamaIndex SimpleDirectoryReader."""
         try:
-            # Load documents with LlamaIndex
-            documents = await self._llamaindex_processor.load_documents(file_path)
+            # Use SimpleDirectoryReader directly
+            reader = SimpleDirectoryReader(
+                input_files=[str(file_path)],
+                exclude_hidden=True,
+            )
+            documents = reader.load_data()
 
             # Convert to ProcessedDocument format
             processed_docs = []
@@ -184,56 +164,9 @@ class DocumentProcessor:
             return processed_docs
 
         except Exception as e:
-            self.logger.error(f"LlamaIndex processing failed: {e}")
-            return await self._process_fallback(file_path, custom_metadata)
+            self.logger.error(f"SimpleDirectoryReader processing failed: {e}")
+            raise DocumentProcessingError(f"Failed to process {file_path}: {e}")
 
-    async def _process_fallback(
-        self,
-        file_path: Path,
-        custom_metadata: Optional[Dict[str, Any]] = None,
-    ) -> List[ProcessedDocument]:
-        """Fallback processing for basic text files."""
-        if file_path.suffix.lower() not in [".txt", ".md"]:
-            raise UnsupportedFormatError(f"Unsupported format: {file_path.suffix}")
-
-        # Read file content
-        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
-
-        # Simple chunking
-        chunks = []
-        chunk_size = self.chunk_size
-        overlap = self.overlap
-
-        for i in range(0, len(content), chunk_size - overlap):
-            chunk = content[i : i + chunk_size]
-            if chunk.strip():
-                chunks.append(chunk)
-
-        # Create ProcessedDocument objects
-        processed_docs = []
-        for i, chunk in enumerate(chunks):
-            metadata = {
-                "source": str(file_path),
-                "filename": file_path.name,
-                "file_extension": file_path.suffix.lower(),
-                "chunk_index": i,
-                "total_chunks": len(chunks),
-                "processed_at": datetime.utcnow().isoformat(),
-                **(custom_metadata or {}),
-                **self.custom_tags,
-            }
-
-            processed_doc = ProcessedDocument(
-                content=chunk,
-                metadata=metadata,
-                source_file=file_path,
-                chunk_index=i,
-                processing_time=0.0,
-            )
-            processed_docs.append(processed_doc)
-
-        return processed_docs
 
     async def process_files(
         self,
@@ -294,26 +227,61 @@ class DocumentProcessor:
         progress_callback: Optional[ProgressCallback] = None,
         custom_metadata: Optional[Dict[str, Any]] = None,
     ) -> tuple[List[ProcessedDocument], ProcessingStats]:
-        """Process all supported files in a directory."""
+        """Process all supported files in a directory using SimpleDirectoryReader."""
         if not directory.exists() or not directory.is_dir():
             raise ValueError(f"Invalid directory: {directory}")
 
-        # Find all files
-        if recursive:
-            file_paths = list(directory.rglob(file_pattern))
-        else:
-            file_paths = list(directory.glob(file_pattern))
+        start_time = asyncio.get_event_loop().time()
+        
+        try:
+            # Use SimpleDirectoryReader for directory processing
+            reader = SimpleDirectoryReader(
+                input_dir=str(directory),
+                recursive=recursive,
+                exclude_hidden=True,
+            )
+            documents = reader.load_data()
 
-        # Filter to only include files
-        file_paths = [f for f in file_paths if f.is_file()]
+            # Convert to ProcessedDocument format
+            processed_docs = []
+            for i, doc in enumerate(documents):
+                metadata = {
+                    **doc.metadata,
+                    **(custom_metadata or {}),
+                    **self.custom_tags,
+                    "chunk_index": i,
+                    "total_chunks": len(documents),
+                    "processed_at": datetime.utcnow().isoformat(),
+                }
 
-        self.logger.info(f"Found {len(file_paths)} files in {directory}")
+                processed_doc = ProcessedDocument(
+                    content=doc.text,
+                    metadata=metadata,
+                    source_file=Path(doc.metadata.get("file_path", "unknown")),
+                    chunk_index=i,
+                    processing_time=0.0,
+                )
+                processed_docs.append(processed_doc)
 
-        return await self.process_files(
-            file_paths,
-            progress_callback=progress_callback,
-            custom_metadata=custom_metadata,
-        )
+                if progress_callback:
+                    progress_callback(i + 1, len(documents), f"Processed document {i+1}")
+
+            # Create statistics
+            stats = ProcessingStats(
+                total_files=len(set(doc.metadata.get("file_path", "unknown") for doc in documents)),
+                processed_files=len(set(doc.metadata.get("file_path", "unknown") for doc in documents)),
+                failed_files=0,
+                total_chunks=len(processed_docs),
+                execution_time=asyncio.get_event_loop().time() - start_time,
+                bytes_processed=sum(len(doc.content) for doc in processed_docs),
+            )
+
+            self.logger.info(f"Processed {len(processed_docs)} documents from {directory}")
+            return processed_docs, stats
+
+        except Exception as e:
+            self.logger.error(f"Failed to process directory {directory}: {e}")
+            raise DocumentProcessingError(f"Directory processing failed: {e}")
 
     def convert_to_documents(
         self, processed_docs: List[ProcessedDocument]
@@ -330,20 +298,44 @@ class DocumentProcessor:
         return documents
 
 
-# Convenience functions for backward compatibility
+# Convenience functions for backward compatibility using SimpleDirectoryReader
 async def process_single_file(
     file_path: Path,
     chunk_size: int = 1000,
     overlap: int = 200,
     custom_tags: Optional[Dict[str, str]] = None,
 ) -> List[Document]:
-    """Process a single file and return Documents."""
-    processor = DocumentProcessor(
-        chunk_size=chunk_size, overlap=overlap, custom_tags=custom_tags
-    )
-
-    processed_docs = await processor.process_file(file_path)
-    return processor.convert_to_documents(processed_docs)
+    """Process a single file using SimpleDirectoryReader and return Documents."""
+    try:
+        # Use SimpleDirectoryReader directly
+        reader = SimpleDirectoryReader(
+            input_files=[str(file_path)],
+            exclude_hidden=True,
+        )
+        llama_docs = reader.load_data()
+        
+        # Convert to legacy Document format
+        documents = []
+        for i, doc in enumerate(llama_docs):
+            metadata = {
+                **doc.metadata,
+                **(custom_tags or {}),
+                "chunk_index": i,
+                "total_chunks": len(llama_docs),
+                "processed_at": datetime.utcnow().isoformat(),
+            }
+            
+            document = Document(
+                page_content=doc.text,
+                metadata=metadata,
+                id=f"{file_path.stem}_{i}",
+            )
+            documents.append(document)
+            
+        return documents
+        
+    except Exception as e:
+        raise DocumentProcessingError(f"Failed to process {file_path}: {e}")
 
 
 async def process_directory_simple(
@@ -353,15 +345,52 @@ async def process_directory_simple(
     recursive: bool = True,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> tuple[List[Document], ProcessingStats]:
-    """Process a directory and return Documents."""
-    processor = DocumentProcessor(chunk_size=chunk_size, overlap=overlap)
-
-    processed_docs, stats = await processor.process_directory(
-        directory, recursive=recursive, progress_callback=progress_callback
-    )
-
-    documents = processor.convert_to_documents(processed_docs)
-    return documents, stats
+    """Process a directory using SimpleDirectoryReader and return Documents."""
+    start_time = asyncio.get_event_loop().time()
+    
+    try:
+        # Use SimpleDirectoryReader directly
+        reader = SimpleDirectoryReader(
+            input_dir=str(directory),
+            recursive=recursive,
+            exclude_hidden=True,
+        )
+        llama_docs = reader.load_data()
+        
+        # Convert to legacy Document format
+        documents = []
+        for i, doc in enumerate(llama_docs):
+            metadata = {
+                **doc.metadata,
+                "chunk_index": i,
+                "total_chunks": len(llama_docs),
+                "processed_at": datetime.utcnow().isoformat(),
+            }
+            
+            document = Document(
+                page_content=doc.text,
+                metadata=metadata,
+                id=f"{Path(doc.metadata.get('file_path', 'unknown')).stem}_{i}",
+            )
+            documents.append(document)
+            
+            if progress_callback:
+                progress_callback(i + 1, len(llama_docs), f"Processed document {i+1}")
+        
+        # Create statistics
+        stats = ProcessingStats(
+            total_files=len(set(doc.metadata.get("file_path", "unknown") for doc in llama_docs)),
+            processed_files=len(set(doc.metadata.get("file_path", "unknown") for doc in llama_docs)),
+            failed_files=0,
+            total_chunks=len(documents),
+            execution_time=asyncio.get_event_loop().time() - start_time,
+            bytes_processed=sum(len(doc.page_content) for doc in documents),
+        )
+        
+        return documents, stats
+        
+    except Exception as e:
+        raise DocumentProcessingError(f"Failed to process directory {directory}: {e}")
 
 
 # Export main classes and functions

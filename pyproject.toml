@@ -18,6 +18,7 @@ dependencies = [
     "llama-index-vector-stores-chroma>=0.1.0",
     "llama-index-llms-openai>=0.1.0",
     "llama-index-readers-file>=0.1.0",
+    "llama-index-retrievers-bm25>=0.1.0",
     "chromadb>=0.4.15",
     "tavily-python>=0.3.0",
     "requests>=2.31.0",

@@ -15,15 +15,15 @@ __version__ = "0.1.0"
 __author__ = "RAG MCP Team"
 
 # Export main classes for convenience
-from .vector_store import VectorStoreManager, Document, SearchResult
+from .vector_store import Document, SearchResult, VectorStoreError
 from .web_search import WebSearchManager, WebSearchResult
 from .document_processor import DocumentProcessor
 from .mcp_server import RAGMCPServer
 
 __all__ = [
-    "VectorStoreManager",
     "Document", 
     "SearchResult",
+    "VectorStoreError",
     "WebSearchManager",
     "WebSearchResult", 
     "DocumentProcessor",

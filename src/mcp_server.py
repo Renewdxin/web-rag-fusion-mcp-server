@@ -25,7 +25,6 @@ from typing import Any, Dict, List, Optional
 
 # MCP imports
 from mcp.server import Server
-from mcp.server.stdio import stdio_server
 from mcp.types import CallToolResult, TextContent, Tool
 
 # JSON Schema validation
@@ -40,22 +39,20 @@ except ImportError:
 
 # Local imports
 from config.settings import ConfigurationError, config
-from .vector_store import SearchResult, VectorStoreError, VectorStoreManager, Document
+from .vector_store import SearchResult, Document
 from .web_search import (
     WebSearchError,
     WebSearchManager,
     WebSearchResult,
 )
-from .document_processor import DocumentProcessor, ProcessingStats
-from .search_optimizer import SearchOptimizer, RankingStrategy
-
+from .document_processor import DocumentProcessor, DocumentProcessingError
 # LlamaIndex imports for enhanced RAG
 try:
-    from .llamaindex_processor import LlamaIndexProcessor
+    from .llamaindex_processor import RAGEngine
     LLAMAINDEX_AVAILABLE = True
 except ImportError:
     LLAMAINDEX_AVAILABLE = False
-    LlamaIndexProcessor = None
+    RAGEngine = None
 
 
 class RateLimiter:
@@ -123,11 +120,10 @@ class RAGMCPServer:
         self._tool_schemas = {}
 
         # Initialize vector store manager (lazy loading)
-        self._vector_store: Optional[VectorStoreManager] = None
+        # Removed: vector store now handled by RAGEngine
 
-        # Initialize LlamaIndex processor (lazy loading)
-        self._llamaindex_processor: Optional[LlamaIndexProcessor] = None
-        self._use_llamaindex = LLAMAINDEX_AVAILABLE and getattr(config, 'USE_LLAMAINDEX', True)
+        # LlamaIndex functionality now handled by RAGEngine
+        self._use_llamaindex = True  # Always true since we use RAGEngine
 
         # Initialize web search manager (lazy loading)
         self._web_search: Optional[WebSearchManager] = None
@@ -135,8 +131,8 @@ class RAGMCPServer:
         # Initialize document processor (lazy loading)
         self._document_processor: Optional[DocumentProcessor] = None
 
-        # Initialize search optimizer (lazy loading)
-        self._search_optimizer: Optional[SearchOptimizer] = None
+        # Initialize RAG engine (lazy loading)
+        self._rag_engine: Optional[RAGEngine] = None
 
         # Document management storage
         self._documents_metadata: Dict[str, Dict[str, Any]] = {}
@@ -739,9 +735,9 @@ class RAGMCPServer:
             Tool(
                 name="optimize_search",
                 description=(
-                    "Optimize search results with advanced techniques including query expansion, "
-                    "hybrid ranking, summarization, personalization, and spell correction. "
-                    "Provides enhanced search quality and user experience."
+                    "[DEPRECATED] This tool has been replaced by the enhanced search_knowledge_base tool. "
+                    "The new RAGEngine automatically provides hybrid ranking, query optimization, and personalization. "
+                    "Please use search_knowledge_base instead."
                 ),
                 inputSchema={
                     "type": "object",
@@ -1077,55 +1073,9 @@ class RAGMCPServer:
                 content=[TextContent(type="text", text=f"Error: {error_msg}")]
             )
 
-    async def _get_vector_store(self) -> VectorStoreManager:
-        """Get or initialize vector store manager."""
-        if self._vector_store is None:
-            try:
-                self._vector_store = VectorStoreManager(
-                    collection_name=(
-                        config.COLLECTION_NAME
-                        if hasattr(config, "COLLECTION_NAME")
-                        else "rag_documents"
-                    ),
-                    persist_directory=(
-                        config.VECTOR_STORE_PATH
-                        if hasattr(config, "VECTOR_STORE_PATH")
-                        else "./data"
-                    ),
-                )
-                await self._vector_store.initialize_collection()
-                self.logger.info("Vector store initialized successfully")
-            except Exception as e:
-                self.logger.error(f"Failed to initialize vector store: {e}")
-                raise VectorStoreError(f"Vector store initialization failed: {e}")
-        return self._vector_store
+    # Removed: _get_vector_store - now using RAGEngine directly
 
-    async def _get_llamaindex_processor(self) -> Optional[LlamaIndexProcessor]:
-        """Get or initialize LlamaIndex processor."""
-        if not self._use_llamaindex or not LLAMAINDEX_AVAILABLE:
-            return None
-            
-        if self._llamaindex_processor is None:
-            try:
-                self._llamaindex_processor = LlamaIndexProcessor(
-                    collection_name=(
-                        config.COLLECTION_NAME
-                        if hasattr(config, "COLLECTION_NAME")
-                        else "rag_documents_llamaindex"
-                    ),
-                    chunk_size=getattr(config, 'CHUNK_SIZE', 1024),
-                    chunk_overlap=getattr(config, 'CHUNK_OVERLAP', 200),
-                    embedding_model=getattr(config, 'EMBEDDING_MODEL', 'text-embedding-3-small'),
-                    similarity_top_k=getattr(config, 'SIMILARITY_TOP_K', 10),
-                    similarity_cutoff=getattr(config, 'SIMILARITY_CUTOFF', 0.7),
-                )
-                self.logger.info("LlamaIndex processor initialized successfully")
-            except Exception as e:
-                self.logger.error(f"Failed to initialize LlamaIndex processor: {e}")
-                # Fall back to traditional vector store
-                self._use_llamaindex = False
-                return None
-        return self._llamaindex_processor
+    # Removed: _get_llamaindex_processor - now using RAGEngine directly
 
     async def _get_web_search(self) -> WebSearchManager:
         """Get or initialize web search manager."""
@@ -1161,26 +1111,27 @@ class RAGMCPServer:
                 raise DocumentProcessingError(f"Document processor initialization failed: {e}")
         return self._document_processor
 
-    async def _get_search_optimizer(self) -> SearchOptimizer:
-        """Get or initialize search optimizer."""
-        if self._search_optimizer is None:
+    async def _get_rag_engine(self) -> RAGEngine:
+        """Get or initialize RAG engine."""
+        if self._rag_engine is None:
             try:
-                self._search_optimizer = SearchOptimizer(
-                    enable_query_expansion=True,
-                    enable_hybrid_ranking=True,
-                    enable_summarization=True,
-                    enable_personalization=True,
-                    enable_spell_correction=True,
-                    enable_semantic_analysis=True,
-                    enable_analytics=True,
-                    enable_ab_testing=True,
+                if not LLAMAINDEX_AVAILABLE:
+                    raise ImportError("LlamaIndex is not available")
+                
+                self._rag_engine = RAGEngine(
+                    collection_name="rag_documents",
+                    chunk_size=1024,
+                    chunk_overlap=200,
+                    embedding_model="text-embedding-3-small",
+                    llm_model="gpt-3.5-turbo",
+                    similarity_top_k=10,
                 )
-                self.logger.info("Search optimizer initialized successfully")
+                self.logger.info("RAG engine initialized successfully")
             except Exception as e:
-                self.logger.error(f"Failed to initialize search optimizer: {e}")
-                # Continue without search optimizer
-                self._search_optimizer = None
-        return self._search_optimizer
+                self.logger.error(f"Failed to initialize RAG engine: {e}")
+                # Continue without RAG engine
+                self._rag_engine = None
+        return self._rag_engine
 
     def _preprocess_query(self, query: str) -> Dict[str, Any]:
         """
@@ -1387,7 +1338,7 @@ class RAGMCPServer:
             include_metadata: bool = True,
     ) -> List[TextContent]:
         """
-        Search the local vector knowledge base.
+        Search the local vector knowledge base using RAGEngine.
 
         Args:
             request_id: Unique request identifier for logging
@@ -1422,66 +1373,38 @@ class RAGMCPServer:
                 f"[{request_id}] Searching knowledge base for: '{query}' (top_k={top_k})"
             )
 
-            # Preprocess query
-            query_info = self._preprocess_query(query)
-            self.logger.debug(
-                f"[{request_id}] Query preprocessing: {query_info['keywords']}"
-            )
-
-            # Try LlamaIndex processor first if available
-            llamaindex_processor = await self._get_llamaindex_processor()
+            # Get RAG engine
+            rag_engine = await self._get_rag_engine()
             
-            if llamaindex_processor:
-                # Use LlamaIndex for more efficient search
-                self.logger.debug(f"[{request_id}] Using LlamaIndex processor")
-                
-                # Perform search with LlamaIndex
-                nodes = await llamaindex_processor.search(
-                    query=query_info["processed"],
-                    top_k=top_k,
-                    similarity_cutoff=0.6,  # Reasonable cutoff for results
-                )
-                
-                # Convert nodes to SearchResult format for compatibility
-                search_results = []
-                for node in nodes:
-                    # Create a Document-like object
-                    doc_content = node.node.text
-                    doc_metadata = node.node.metadata or {}
-                    
-                    # Create SearchResult
-                    from .vector_store import SearchResult
-                    result = SearchResult(
-                        document=Document(
-                            page_content=doc_content,
-                            metadata=doc_metadata,
-                            id=node.node.id_ if hasattr(node.node, 'id_') else None,
-                        ),
-                        score=node.score,
-                        metadata=doc_metadata,
+            if not rag_engine:
+                return [
+                    TextContent(
+                        type="text",
+                        text="❌ Error: RAG engine not available. Please check LlamaIndex installation.",
                     )
-                    search_results.append(result)
-                    
-            else:
-                # Fallback to traditional vector store
-                self.logger.debug(f"[{request_id}] Using traditional vector store")
-                vector_store = await self._get_vector_store()
-                
-                # Perform similarity search
-                search_results = await vector_store.similarity_search_with_score(
-                    query=query_info["processed"],
-                    k=top_k,
-                    filter_dict=filter_dict,
-                    include_metadata=include_metadata,
-                )
+                ]
 
-            # Sort results
-            sorted_results = self._sort_results(search_results)
+            # Prepare user preferences for filtering
+            user_preferences = None
+            if filter_dict:
+                user_preferences = {}
+                if "tags" in filter_dict:
+                    user_preferences["tags"] = filter_dict["tags"]
+                # Add other filters as needed
+                for key, value in filter_dict.items():
+                    if key != "tags":
+                        user_preferences[key] = value
+
+            # Execute query using RAGEngine
+            response = await rag_engine.query(
+                query_text=query,
+                user_preferences=user_preferences
+            )
 
             search_time = time.time() - search_start_time
 
-            # Handle empty results
-            if not sorted_results:
+            # Handle empty or error response
+            if not response or not response.response:
                 friendly_message = (
                     f"🔍 **No results found for '{query}'**\n\n"
                     f"💡 **Suggestions:**\n"
@@ -1493,84 +1416,82 @@ class RAGMCPServer:
                 )
                 return [TextContent(type="text", text=friendly_message)]
 
-            # Format results
+            # Format response with source citations
             response_lines = [
-                f"🔍 **Found {len(sorted_results)} result{'s' if len(sorted_results) != 1 else ''} for '{query}'**\n"
+                f"🤖 **RAG Response for '{query}'**\n",
+                f"📝 **Answer:**",
+                response.response,
+                f"",  # Empty line
             ]
 
-            for i, result in enumerate(sorted_results, 1):
-                # Format similarity score
-                score_str = f"{result.score:.3f}"
-                score_emoji = (
-                    "🟢"
-                    if result.score >= 0.8
-                    else "🟡" if result.score >= 0.6 else "🔴"
-                )
+            # Add source citations
+            if response.source_nodes:
+                response_lines.extend([
+                    f"📚 **Sources ({len(response.source_nodes)} documents):**",
+                    f""
+                ])
+                
+                for i, node in enumerate(response.source_nodes[:top_k], 1):
+                    # Format similarity score
+                    score = getattr(node, 'score', 0.0)
+                    score_str = f"{score:.3f}"
+                    score_emoji = (
+                        "🟢" if score >= 0.8
+                        else "🟡" if score >= 0.6 
+                        else "🔴"
+                    )
 
-                # Extract source file path
-                source_path = "Unknown source"
-                if result.document.metadata and "source" in result.document.metadata:
-                    source_path = str(result.document.metadata["source"])
-                    # Make path clickable if it's a valid file path
-                    if source_path.startswith("/") or source_path.startswith("."):
+                    # Extract source information
+                    source_path = "Unknown source"
+                    metadata = getattr(node.node, 'metadata', {})
+                    if metadata and "source" in metadata:
+                        source_path = str(metadata["source"])
                         try:
                             path_obj = Path(source_path)
-                            if path_obj.exists():
-                                source_path = f"[{path_obj.name}]({source_path})"
-                            else:
-                                source_path = f"📄 {path_obj.name}"
+                            source_path = f"📄 {path_obj.name}"
                         except Exception:
                             source_path = f"📄 {source_path}"
 
-                # Highlight and truncate content
-                highlighted_content = self._highlight_content(
-                    result.document.page_content, query_info["keywords"], max_length=500
-                )
+                    # Get content preview
+                    content = getattr(node.node, 'text', '')
+                    content_preview = content[:200] + "..." if len(content) > 200 else content
 
-                # Build result entry
-                result_lines = [
-                    f"**{i}. {score_emoji} Similarity: {score_str}**",
-                    f"📂 **Source:** {source_path}",
-                    f"",  # Empty line
-                    f"📖 **Content:**",
-                    highlighted_content,
-                ]
+                    # Build source entry
+                    source_lines = [
+                        f"**{i}. {score_emoji} Relevance: {score_str}**",
+                        f"📂 **Source:** {source_path}",
+                        f"📖 **Content:** {content_preview}",
+                    ]
 
-                # Add metadata if requested
-                if include_metadata and result.document.metadata:
-                    metadata_str = self._format_metadata(result.document.metadata)
-                    result_lines.extend(
-                        [f"", f"ℹ️ **Metadata:**", metadata_str]  # Empty line
-                    )
+                    # Add metadata if requested and available
+                    if include_metadata and metadata:
+                        filtered_metadata = {k: v for k, v in metadata.items() 
+                                           if k not in ['source', 'text']}
+                        if filtered_metadata:
+                            metadata_str = ", ".join([f"{k}: {v}" for k, v in filtered_metadata.items()])
+                            source_lines.append(f"ℹ️ **Metadata:** {metadata_str}")
 
-                result_lines.append("\n" + "-" * 50 + "\n")  # Separator
-                response_lines.extend(result_lines)
+                    source_lines.append("")  # Empty line
+                    response_lines.extend(source_lines)
 
             # Add search statistics
-            response_lines.extend(
-                [
-                    f"⏱️ **Search completed in {search_time:.3f} seconds**",
-                    f"🎯 **Keywords used:** {', '.join(query_info['keywords'][:5])}",  # Show first 5 keywords
-                ]
-            )
+            response_lines.extend([
+                f"⏱️ **Search completed in {search_time:.3f} seconds**",
+                f"🔍 **Query processed with hybrid retrieval (Vector + BM25)**",
+            ])
 
             response_text = "\n".join(response_lines)
 
             self.logger.info(
-                f"[{request_id}] Knowledge base search completed: {len(sorted_results)} results in {search_time:.3f}s"
+                f"[{request_id}] RAG search completed: {len(response.source_nodes) if response.source_nodes else 0} sources in {search_time:.3f}s"
             )
 
             return [TextContent(type="text", text=response_text)]
 
-        except VectorStoreError as e:
-            error_msg = f"❌ **Vector store error:** {str(e)}"
-            self.logger.error(f"[{request_id}] Vector store error: {e}")
-            return [TextContent(type="text", text=error_msg)]
-
         except Exception as e:
-            error_msg = f"❌ **Search failed:** {str(e)}"
+            error_msg = f"❌ **RAG search failed:** {str(e)}"
             self.logger.error(
-                f"[{request_id}] Unexpected error during search: {e}", exc_info=True
+                f"[{request_id}] Unexpected error during RAG search: {e}", exc_info=True
             )
             return [TextContent(type="text", text=error_msg)]
 
@@ -1794,15 +1715,13 @@ class RAGMCPServer:
             min_local_results: int = 2,
     ) -> List[TextContent]:
         """
-        Perform sophisticated intelligent hybrid search with advanced decision logic.
+        Simplified smart search using RAGEngine with web search fallback.
 
-        This method implements a comprehensive search strategy that:
-        1. Searches local knowledge base first
+        This method implements an intelligent search strategy:
+        1. Uses RAGEngine for local knowledge base search with hybrid retrieval
         2. Evaluates result quality against similarity threshold
-        3. Makes intelligent decisions about web search necessity
-        4. Combines and deduplicates results across sources
-        5. Provides relevance explanations and confidence scoring
-        6. Assesses source credibility
+        3. Falls back to web search if local results are insufficient
+        4. Combines results with clear source attribution
 
         Args:
             request_id: Unique request identifier for logging
@@ -1811,273 +1730,174 @@ class RAGMCPServer:
             local_top_k: Maximum local results to retrieve
             web_max_results: Maximum web results to retrieve
             include_sources: Whether to include detailed source information
-            combine_strategy: Strategy for combining results
+            combine_strategy: Strategy for combining results (ignored for now)
             min_local_results: Minimum local results before considering web search
 
         Returns:
-            List of TextContent with sophisticated search results and analysis
+            List of TextContent with smart search results
         """
         start_time = time.time()
-        self.logger.debug(
-            f"[{request_id}] Starting smart search with threshold {similarity_threshold}"
-        )
+        self.logger.info(f"[{request_id}] Starting smart search with RAGEngine")
 
         try:
-            # Step 1: Search local knowledge base
-            self.logger.debug(f"[{request_id}] Step 1: Searching local knowledge base")
-            local_search_start = time.time()
-
-            # Try LlamaIndex first if available
-            llamaindex_processor = await self._get_llamaindex_processor()
+            # Step 1: Search using RAGEngine
+            rag_engine = await self._get_rag_engine()
             
-            if llamaindex_processor:
-                self.logger.debug(f"[{request_id}] Using LlamaIndex for smart search")
+            local_response = None
+            local_confidence = 0.0
+            
+            if rag_engine:
+                self.logger.debug(f"[{request_id}] Using RAGEngine for local search")
                 
-                # Use LlamaIndex for local search
-                nodes = await llamaindex_processor.search(
-                    query=query,
-                    top_k=local_top_k,
-                    similarity_cutoff=0.6,
+                # Execute query with RAGEngine
+                rag_response = await rag_engine.query(
+                    query_text=query,
+                    user_preferences=None
                 )
                 
-                # Convert to SearchResult format
-                local_raw_results = []
-                for node in nodes:
-                    doc_content = node.node.text
-                    doc_metadata = node.node.metadata or {}
+                if rag_response and rag_response.response and rag_response.source_nodes:
+                    local_response = rag_response
+                    # Calculate confidence based on source node scores
+                    if rag_response.source_nodes:
+                        scores = [getattr(node, 'score', 0.0) for node in rag_response.source_nodes]
+                        local_confidence = max(scores) if scores else 0.0
                     
-                    from .vector_store import SearchResult
-                    result = SearchResult(
-                        document=Document(
-                            page_content=doc_content,
-                            metadata=doc_metadata,
-                            id=node.node.id_ if hasattr(node.node, 'id_') else None,
-                        ),
-                        score=node.score,
-                        metadata=doc_metadata,
+                    self.logger.info(
+                        f"[{request_id}] RAG search: {len(rag_response.source_nodes)} sources, "
+                        f"confidence={local_confidence:.3f}"
                     )
-                    local_raw_results.append(result)
-                    
-            else:
-                # Fallback to traditional vector store
-                vector_store = await self._get_vector_store()
-                local_raw_results = await vector_store.search(
-                    query=query, top_k=local_top_k, filter_dict=None
-                )
 
-            local_search_time = time.time() - local_search_start
-
-            # Calculate maximum score and analyze local results quality
-            max_local_score = 0.0
-            high_quality_local_count = 0
-
-            if local_raw_results:
-                max_local_score = max(result.score for result in local_raw_results)
-                high_quality_local_count = sum(
-                    1 for result in local_raw_results if result.score >= 0.8
-                )
-
-            self.logger.info(
-                f"[{request_id}] Local search: {len(local_raw_results)} results, max_score={max_local_score:.3f}"
-            )
-
-            # Step 2: Decision logic implementation
             web_search_triggered = False
             decision_reason = ""
             confidence_level = "HIGH"
-
-            if not local_raw_results:
-                # No local results - perform web search directly
+            web_response = None
+            
+            # Decide if web search is needed based on local results
+            if not local_response or not local_response.source_nodes:
+                # No local results - perform web search
+                web_search_triggered = True
+                decision_reason = "No local knowledge found - searching web for comprehensive results"
+                confidence_level = "MEDIUM"
+            elif local_confidence < similarity_threshold:
+                # Low confidence local results - supplement with web search
                 web_search_triggered = True
                 decision_reason = (
-                    "No local knowledge found - searching web for comprehensive results"
+                    f"Local results confidence below threshold ({local_confidence:.3f} < {similarity_threshold}) "
+                    f"- enhancing with web search"
                 )
                 confidence_level = "MEDIUM"
-            elif max_local_score < similarity_threshold:
-                # Low quality local results - supplement with web search
+            elif len(local_response.source_nodes) < min_local_results:
+                # Insufficient local source diversity
                 web_search_triggered = True
-                decision_reason = f"Local results quality below threshold ({max_local_score:.3f} < {similarity_threshold}) - enhancing with web search"
-                confidence_level = "MEDIUM"
-            elif len(local_raw_results) < min_local_results:
-                # Insufficient local results - get more from web
-                web_search_triggered = True
-                decision_reason = f"Insufficient local results ({len(local_raw_results)} < {min_local_results}) - supplementing with web search"
+                decision_reason = (
+                    f"Insufficient local sources ({len(local_response.source_nodes)} < {min_local_results}) "
+                    f"- supplementing with web search"
+                )
                 confidence_level = "MEDIUM"
             else:
                 # High quality local results sufficient
-                decision_reason = f"Local knowledge sufficient (max_score={max_local_score:.3f} >= {similarity_threshold})"
+                decision_reason = (
+                    f"Local knowledge sufficient (confidence={local_confidence:.3f} >= {similarity_threshold})"
+                )
                 confidence_level = "HIGH"
 
             # Step 3: Web search if triggered
-            web_raw_results = []
             web_search_time = 0.0
-
+            
             if web_search_triggered and web_max_results > 0:
-                self.logger.debug(f"[{request_id}] Step 3: Performing web search")
+                self.logger.debug(f"[{request_id}] Performing web search as fallback")
                 web_search_start = time.time()
 
                 try:
-                    web_search_mgr = await self._get_web_search()
-                    web_raw_results, web_metadata = await web_search_mgr.search(
-                        query=query, max_results=web_max_results, include_answer=True
+                    # Use the existing web search functionality
+                    web_results = await self._search_web(
+                        request_id=request_id,
+                        query=query,
+                        max_results=web_max_results,
+                        include_answer=True,
                     )
                     web_search_time = time.time() - web_search_start
-                    self.logger.info(
-                        f"[{request_id}] Web search: {len(web_raw_results)} results"
-                    )
+                    
+                    # Extract the web search response text
+                    if web_results and web_results[0].text:
+                        web_response = web_results[0].text
+                    
+                    self.logger.info(f"[{request_id}] Web search completed in {web_search_time:.3f}s")
 
                 except Exception as e:
                     self.logger.warning(f"[{request_id}] Web search failed: {e}")
-                    web_raw_results = []
-                    confidence_level = "LOW" if not local_raw_results else "MEDIUM"
+                    web_response = None
+                    confidence_level = "LOW" if not local_response else "MEDIUM"
 
-            # Step 4: Cross-source result deduplication
-            deduplicated_results = self._deduplicate_results(
-                local_raw_results, web_raw_results
-            )
-
-            # Step 5: Source credibility assessment and relevance scoring
-            enhanced_results = self._assess_result_credibility(
-                deduplicated_results, query
-            )
-
-            # Step 6: Format comprehensive response
+            # Step 4: Format combined response
             total_time = time.time() - start_time
-            response_sections = []
+            
+            response_lines = [
+                f"🧠 **Smart Search Results for '{query}'**\n",
+                f"🎯 **Search Strategy:** RAGEngine + Web Fallback",
+                f"📊 **Confidence Level:** {confidence_level}",
+                f"🔍 **Decision:** {decision_reason}",
+                f"⏱️ **Total Time:** {total_time:.3f}s\n",
+            ]
 
-            # Header with decision summary
-            response_sections.append(
-                f"🧠 **Smart Search Results for '{query}'**\n"
-                f"**Decision:** {decision_reason}\n"
-                f"**Confidence Level:** {confidence_level}\n"
-                f"**Total Processing Time:** {total_time:.3f}s\n"
-            )
+            # Add local RAG results
+            if local_response and local_response.response:
+                response_lines.extend([
+                    "## 🏠 Local Knowledge (RAG)",
+                    f"**Answer:** {local_response.response}",
+                    f"**Confidence:** {local_confidence:.3f}",
+                    f"**Sources:** {len(local_response.source_nodes)} documents\n",
+                ])
+                
+                # Add source details if requested
+                if include_sources and local_response.source_nodes:
+                    response_lines.append("**Source Details:**")
+                    for i, node in enumerate(local_response.source_nodes[:3], 1):  # Show top 3
+                        score = getattr(node, 'score', 0.0)
+                        score_emoji = "🟢" if score >= 0.8 else "🟡" if score >= 0.6 else "🔴"
+                        
+                        metadata = getattr(node.node, 'metadata', {})
+                        source_path = metadata.get('source', 'Unknown')
+                        if source_path != 'Unknown':
+                            try:
+                                source_path = f"📄 {Path(source_path).name}"
+                            except Exception:
+                                source_path = f"📄 {source_path}"
+                        
+                        content_preview = getattr(node.node, 'text', '')[:150]
+                        response_lines.append(
+                            f"{i}. {score_emoji} **{source_path}** (score: {score:.3f})\n"
+                            f"   {content_preview}{'...' if len(content_preview) >= 150 else ''}"
+                        )
+                    response_lines.append("")
 
-            # Local Knowledge Base Results Section
-            response_sections.append("## 📚 Local Knowledge Base Results\n")
-
-            if local_raw_results:
-                response_sections.append(
-                    f"**Found {len(local_raw_results)} local result{'s' if len(local_raw_results) != 1 else ''}**\n"
-                    f"**Maximum Similarity Score:** {max_local_score:.3f}\n"
-                    f"**High Quality Results:** {high_quality_local_count}/{len(local_raw_results)}\n"
-                    f"**Search Time:** {local_search_time:.3f}s\n"
-                )
-
-                for i, result in enumerate(
-                        local_raw_results[:3], 1
-                ):  # Show top 3 local results
-                    relevance_explanation = self._generate_relevance_explanation(
-                        result, query, "local"
-                    )
-                    source_path = (
-                        result.metadata.get("source", "Unknown source")
-                        if result.metadata
-                        else "Unknown source"
-                    )
-
-                    # Score visualization
-                    score_emoji = (
-                        "🟢"
-                        if result.score >= 0.8
-                        else "🟡" if result.score >= 0.6 else "🔴"
-                    )
-
-                    response_sections.append(
-                        f"**{i}. {score_emoji} Similarity: {result.score:.3f}**\n"
-                        f"📂 **Source:** [{source_path}]({source_path})\n"
-                        f"📖 **Content Preview:** {result.content[:200]}{'...' if len(result.content) > 200 else ''}\n"
-                        f"🎯 **Relevance:** {relevance_explanation}\n"
-                        f"{'─' * 40}\n"
-                    )
-            else:
-                response_sections.append(
-                    "❌ **No local knowledge found for this query**\n"
-                )
-
-            # Web Search Results Section (if performed)
+            # Add web search results if performed
             if web_search_triggered:
-                response_sections.append("\n## 🌐 Web Search Results\n")
-
-                if web_raw_results:
-                    response_sections.append(
-                        f"**Found {len(web_raw_results)} web result{'s' if len(web_raw_results) != 1 else ''}**\n"
-                        f"**Search Time:** {web_search_time:.3f}s\n"
-                        f"**Status:** {'✅ Fresh results' if web_search_time > 0 else '📋 Cached results'}\n"
-                    )
-
-                    for i, result in enumerate(
-                            web_raw_results[:3], 1
-                    ):  # Show top 3 web results
-                        relevance_explanation = self._generate_relevance_explanation(
-                            result, query, "web"
-                        )
-                        credibility_score = self._calculate_credibility_score(result)
-
-                        # Score and credibility visualization
-                        score_emoji = (
-                            "🟢"
-                            if result.score >= 0.8
-                            else "🟡" if result.score >= 0.6 else "🔴"
-                        )
-                        credibility_emoji = (
-                            "🏆"
-                            if credibility_score >= 0.8
-                            else "✅" if credibility_score >= 0.6 else "⚠️"
-                        )
-
-                        response_sections.append(
-                            f"**{i}. {score_emoji} Quality Score: {result.score:.3f}**\n"
-                            f"📰 **Title:** {result.title}\n"
-                            f"🌐 **Source:** [{result.source_domain or 'Unknown'}]({result.url})\n"
-                            f"{credibility_emoji} **Credibility:** {credibility_score:.2f}/1.0\n"
-                            f"📄 **Content Preview:** {result.content[:200]}{'...' if len(result.content) > 200 else ''}\n"
-                            f"🎯 **Relevance:** {relevance_explanation}\n"
-                            f"{'─' * 40}\n"
-                        )
+                if web_response:
+                    response_lines.extend([
+                        "## 🌐 Web Search Supplement",
+                        f"**Search Time:** {web_search_time:.3f}s",
+                        web_response,
+                    ])
                 else:
-                    response_sections.append(
-                        "❌ **No web results found or web search failed**\n"
-                    )
+                    response_lines.extend([
+                        "## 🌐 Web Search",
+                        "❌ Web search was attempted but failed to return results",
+                    ])
 
-            # Smart Recommendations Section
-            response_sections.append("\n## 🎯 Smart Recommendations\n")
+            # Add footer
+            response_lines.extend([
+                "\n---",
+                f"🔧 **Search powered by:** RAGEngine (Hybrid Vector + BM25) + Web Fallback",
+                f"📈 **Result quality:** {confidence_level}",
+            ])
 
-            recommendations = self._generate_smart_recommendations(
-                local_raw_results,
-                web_raw_results,
-                max_local_score,
-                similarity_threshold,
-                confidence_level,
-                query,
-            )
-            response_sections.append(recommendations)
-
-            # Search Strategy Summary
-            response_sections.append("\n## 📊 Search Strategy Analysis\n")
-            response_sections.append(
-                f"**Strategy Used:** {combine_strategy}\n"
-                f"**Threshold Applied:** {similarity_threshold}\n"
-                f"**Web Search Triggered:** {'✅ Yes' if web_search_triggered else '❌ No'}\n"
-                f"**Total Sources Consulted:** {len(local_raw_results) + len(web_raw_results)}\n"
-                f"**Deduplication Applied:** ✅ Cross-source duplicate removal\n"
-                f"**Overall Confidence:** {confidence_level}\n"
-            )
-
-            # Performance metrics
-            response_sections.append(
-                f"\n⏱️ **Performance Metrics:**\n"
-                f"• Local search: {local_search_time:.3f}s\n"
-                f"• Web search: {web_search_time:.3f}s\n"
-                f"• Total processing: {total_time:.3f}s\n"
-            )
-
-            final_response = "\n".join(response_sections)
+            final_response = "\n".join(response_lines)
 
             self.logger.info(
                 f"[{request_id}] Smart search completed: "
-                f"local={len(local_raw_results)}, web={len(web_raw_results)}, "
-                f"confidence={confidence_level}, time={total_time:.3f}s"
+                f"local_sources={len(local_response.source_nodes) if local_response and local_response.source_nodes else 0}, "
+                f"web_triggered={web_search_triggered}, confidence={confidence_level}, time={total_time:.3f}s"
             )
 
             return [TextContent(type="text", text=final_response)]
@@ -2086,6 +1906,7 @@ class RAGMCPServer:
             error_msg = f"❌ **Smart search failed:** {str(e)}\n\nPlease try again or contact support if the issue persists."
             self.logger.error(f"[{request_id}] Smart search error: {e}", exc_info=True)
             return [TextContent(type="text", text=error_msg)]
+
 
     def _deduplicate_results(
             self, local_results: List[SearchResult], web_results: List[WebSearchResult]
@@ -2444,96 +2265,142 @@ class RAGMCPServer:
         batch_files: Optional[List[str]] = None,
         auto_detect_type: bool = True,
     ) -> List[TextContent]:
-        """Add document(s) to the knowledge base."""
+        """Add document(s) to the knowledge base using RAGEngine."""
         try:
-            doc_processor = await self._get_document_processor()
-            vector_store = await self._get_vector_store()
+            # Get RAG engine
+            rag_engine = await self._get_rag_engine()
+            if not rag_engine:
+                return [TextContent(
+                    type="text",
+                    text="❌ Error: RAG engine not available. Please check LlamaIndex installation."
+                )]
             
             metadata = metadata or {}
             tags = tags or []
             batch_files = batch_files or []
             
+            # Add processing metadata
+            metadata.update({
+                "created_at": datetime.now().isoformat(),
+                "tags": tags,
+                "processor": "rag_engine_direct"
+            })
+            
             # Track processing results
             results = []
-            total_chunks = 0
+            total_docs = 0
             processing_time = time.time()
             
             if batch_files:
-                # Batch processing
-                for file in batch_files:
+                # Batch file processing using SimpleDirectoryReader
+                from llama_index.core import SimpleDirectoryReader
+                
+                for file_path in batch_files:
                     try:
-                        processed_docs = await doc_processor.process_file(Path(file))
-                        for doc in processed_docs:
+                        # Use LlamaIndex SimpleDirectoryReader for each file
+                        documents = SimpleDirectoryReader(
+                            input_files=[file_path],
+                            exclude_hidden=True,
+                        ).load_data()
+                        
+                        # Add metadata to each document
+                        for doc in documents:
                             doc_id = str(uuid.uuid4())
                             doc.metadata.update(metadata)
                             doc.metadata["document_id"] = doc_id
-                            doc.metadata["tags"] = tags
-                            doc.metadata["created_at"] = datetime.now().isoformat()
-                            
-                            # Store in vector database
-                            await vector_store.add_documents([Document(
-                                page_content=doc.content,
-                                metadata=doc.metadata,
-                                id=doc_id
-                            )])
-                            
+                            doc.metadata["source"] = file_path
+                        
+                        # Add documents to RAGEngine
+                        success = await rag_engine.add_documents(documents)
+                        
+                        if success:
                             # Track document metadata
+                            for doc in documents:
+                                doc_id = doc.metadata["document_id"]
+                                self._documents_metadata[doc_id] = doc.metadata
+                                self._document_tags[doc_id] = tags
+                                self._document_usage[doc_id] = {"access_count": 0, "last_accessed": None}
+                            
+                            total_docs += len(documents)
+                            results.append(f"✅ {Path(file_path).name}: {len(documents)} documents")
+                        else:
+                            results.append(f"❌ {Path(file_path).name}: Failed to add to RAG engine")
+                            
+                    except Exception as e:
+                        results.append(f"❌ {Path(file_path).name}: {str(e)}")
+                        
+            elif file_path:
+                # Single file processing using SimpleDirectoryReader
+                from llama_index.core import SimpleDirectoryReader
+                
+                try:
+                    documents = SimpleDirectoryReader(
+                        input_files=[file_path],
+                        exclude_hidden=True,
+                    ).load_data()
+                    
+                    # Add metadata to each document
+                    for doc in documents:
+                        doc_id = str(uuid.uuid4())
+                        doc.metadata.update(metadata)
+                        doc.metadata["document_id"] = doc_id
+                        doc.metadata["source"] = file_path
+                    
+                    # Add documents to RAGEngine
+                    success = await rag_engine.add_documents(documents)
+                    
+                    if success:
+                        # Track document metadata
+                        for doc in documents:
+                            doc_id = doc.metadata["document_id"]
                             self._documents_metadata[doc_id] = doc.metadata
                             self._document_tags[doc_id] = tags
                             self._document_usage[doc_id] = {"access_count": 0, "last_accessed": None}
-                            
-                            total_chunks += 1
-                            results.append(f"✅ {Path(file).name}: {doc_id}")
-                    except Exception as e:
-                        results.append(f"❌ {Path(file).name}: {str(e)}")
                         
-            elif file_path:
-                # Single file processing
-                processed_docs = await doc_processor.process_file(Path(file_path))
-                for doc in processed_docs:
-                    doc_id = str(uuid.uuid4())
-                    doc.metadata.update(metadata)
-                    doc.metadata["document_id"] = doc_id
-                    doc.metadata["tags"] = tags
-                    doc.metadata["created_at"] = datetime.now().isoformat()
-                    
-                    await vector_store.add_documents([Document(
-                        page_content=doc.content,
-                        metadata=doc.metadata,
-                        id=doc_id
-                    )])
-                    
-                    self._documents_metadata[doc_id] = doc.metadata
-                    self._document_tags[doc_id] = tags
-                    self._document_usage[doc_id] = {"access_count": 0, "last_accessed": None}
-                    
-                    total_chunks += 1
-                    results.append(f"✅ Document added: {doc_id}")
+                        total_docs = len(documents)
+                        results.append(f"✅ {Path(file_path).name}: {len(documents)} documents")
+                    else:
+                        results.append(f"❌ {Path(file_path).name}: Failed to add to RAG engine")
+                        
+                except Exception as e:
+                    results.append(f"❌ {Path(file_path).name}: {str(e)}")
                     
             elif content:
-                # Raw content processing
-                doc_id = str(uuid.uuid4())
-                enhanced_metadata = {
-                    **metadata,
-                    "document_id": doc_id,
-                    "tags": tags,
-                    "created_at": datetime.now().isoformat(),
-                    "source": "raw_content",
-                    "content_length": len(content)
-                }
+                # Raw content processing using LlamaIndex Document
+                from llama_index.core import Document as LlamaDocument
                 
-                await vector_store.add_documents([Document(
-                    page_content=content,
-                    metadata=enhanced_metadata,
-                    id=doc_id
-                )])
-                
-                self._documents_metadata[doc_id] = enhanced_metadata
-                self._document_tags[doc_id] = tags
-                self._document_usage[doc_id] = {"access_count": 0, "last_accessed": None}
-                
-                total_chunks += 1
-                results.append(f"✅ Content added: {doc_id}")
+                try:
+                    doc_id = str(uuid.uuid4())
+                    enhanced_metadata = {
+                        **metadata,
+                        "document_id": doc_id,
+                        "source": "raw_content",
+                        "content_length": len(content)
+                    }
+                    
+                    # Create LlamaIndex document
+                    llama_doc = LlamaDocument(
+                        text=content,
+                        metadata=enhanced_metadata,
+                        doc_id=doc_id
+                    )
+                    
+                    # Add document to RAGEngine
+                    success = await rag_engine.add_documents([llama_doc])
+                    
+                    if success:
+                        # Track document metadata
+                        self._documents_metadata[doc_id] = enhanced_metadata
+                        self._document_tags[doc_id] = tags
+                        self._document_usage[doc_id] = {"access_count": 0, "last_accessed": None}
+                        
+                        total_docs = 1
+                        results.append(f"✅ Content added: {doc_id}")
+                    else:
+                        results.append(f"❌ Content: Failed to add to RAG engine")
+                        
+                except Exception as e:
+                    results.append(f"❌ Content: {str(e)}")
                 
             processing_time = time.time() - processing_time
             
@@ -2542,14 +2409,14 @@ class RAGMCPServer:
 
 **Processing Summary:**
 • Documents processed: {len(results)}
-• Total chunks created: {total_chunks}
+• Total documents created: {total_docs}
 • Processing time: {processing_time:.2f}s
 
 **Results:**
 {chr(10).join(results)}
 
 **Statistics:**
-• Success rate: {len([r for r in results if r.startswith('✅')])/len(results)*100:.1f}%
+• Success rate: {len([r for r in results if r.startswith('✅')])/len(results)*100:.1f}% if results else 100.0%
 • Failed: {len([r for r in results if r.startswith('❌')])}
 """
             
@@ -3012,112 +2879,38 @@ class RAGMCPServer:
         enable_summarization: bool = True,
         max_results: int = 10,
     ) -> List[TextContent]:
-        """Optimize search results using SearchOptimizer."""
-        try:
-            # Get search optimizer
-            optimizer = await self._get_search_optimizer()
-            if not optimizer:
-                return [TextContent(type="text", text="❌ **Search optimizer not available**")]
-            
-            # First, get base search results
-            vector_store = await self._get_vector_store()
-            base_results = await vector_store.similarity_search_with_score(
-                query=query,
-                k=max_results * 2,  # Get more results for better optimization
-                include_metadata=True
+        """[DEPRECATED] Redirects to search_knowledge_base with RAGEngine."""
+        
+        # Add deprecation warning
+        deprecation_warning = [
+            TextContent(
+                type="text",
+                text=(
+                    "⚠️ **DEPRECATED:** The optimize_search tool is deprecated. "
+                    "The new search_knowledge_base tool with RAGEngine automatically provides "
+                    "hybrid ranking, query optimization, and personalization.\n\n"
+                    "Redirecting your query to search_knowledge_base...\n"
+                )
             )
-            
-            # Convert ranking strategy string to enum
-            strategy_map = {
-                "vector_only": RankingStrategy.VECTOR_ONLY,
-                "bm25_only": RankingStrategy.BM25_ONLY,
-                "hybrid_balanced": RankingStrategy.HYBRID_BALANCED,
-                "hybrid_vector_weighted": RankingStrategy.HYBRID_VECTOR_WEIGHTED,
-                "hybrid_bm25_weighted": RankingStrategy.HYBRID_BM25_WEIGHTED,
-                "personalized": RankingStrategy.PERSONALIZED,
-            }
-            strategy = strategy_map.get(ranking_strategy, RankingStrategy.HYBRID_BALANCED)
-            
-            # Optimize search results
-            optimized_results = await optimizer.optimize_search(
-                query=query,
-                user_id=user_id,
-                search_results=base_results,
-                ranking_strategy=strategy,
-                enable_personalization=enable_personalization,
-                enable_summarization=enable_summarization,
-                max_results=max_results
-            )
-            
-            # Format response
-            response_lines = [
-                f"🔍 **Optimized Search Results for '{query}'**\n",
-                f"**User:** {user_id}",
-                f"**Strategy:** {ranking_strategy}",
-                f"**Optimizations Applied:** {', '.join(optimized_results['metadata']['optimizations_applied'])}",
-                f"**Processing Time:** {optimized_results['metadata']['processing_time']:.3f}s\n",
-            ]
-            
-            # Add query analysis if available
-            if 'query_analysis' in optimized_results['metadata']:
-                analysis = optimized_results['metadata']['query_analysis']
-                response_lines.extend([
-                    f"**Query Analysis:**",
-                    f"• Type: {analysis['type']}",
-                    f"• Intent: {analysis['intent']}",
-                    f"• Complexity: {analysis['complexity']:.2f}",
-                    f"• Confidence: {analysis['confidence']:.2f}\n"
-                ])
-            
-            # Add expanded query information
-            if 'expanded_query' in optimized_results['metadata']:
-                expanded = optimized_results['metadata']['expanded_query']
-                if expanded['synonyms']:
-                    response_lines.append(f"**Query Expansion:** {len(expanded['synonyms'])} terms expanded")
-                if expanded['boost_terms']:
-                    response_lines.append(f"**Boost Terms:** {', '.join(expanded['boost_terms'])}")
-                response_lines.append("")
-            
-            # Add spelling suggestions if available
-            if 'spelling_suggestions' in optimized_results['metadata']:
-                suggestions = optimized_results['metadata']['spelling_suggestions']
-                if suggestions:
-                    response_lines.append(f"**Spelling Suggestions:** {len(suggestions)} corrections found\n")
-            
-            # Display optimized results
-            response_lines.append(f"**Results ({len(optimized_results['optimized_results'])}):**\n")
-            
-            for i, result_data in enumerate(optimized_results['optimized_results'], 1):
-                doc = result_data['document']
-                ranking_score = result_data['ranking_score']
-                summary = result_data['summary']
-                
-                # Format document info
-                source = doc.metadata.get('source', 'Unknown')[:50]
-                response_lines.extend([
-                    f"**{i}. Score: {ranking_score.final_score:.3f}**",
-                    f"📂 **Source:** {source}",
-                    f"📊 **Ranking:** Vector: {ranking_score.vector_score:.3f}, BM25: {ranking_score.bm25_score:.3f}, Personal: {ranking_score.personalization_score:.3f}",
-                ])
-                
-                # Add summary if available
-                if summary and enable_summarization:
-                    response_lines.extend([
-                        f"📄 **Summary:** {summary.summary_text[:200]}{'...' if len(summary.summary_text) > 200 else ''}",
-                        f"🎯 **Relevance:** {summary.relevance_score:.3f}",
-                    ])
-                else:
-                    # Fallback to content preview
-                    preview = doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content
-                    response_lines.append(f"📄 **Content:** {preview}")
-                
-                response_lines.append("─" * 50)
-            
-            return [TextContent(type="text", text="\n".join(response_lines))]
-            
-        except Exception as e:
-            self.logger.error(f"[{request_id}] Search optimization failed: {e}")
-            return [TextContent(type="text", text=f"❌ **Error optimizing search:** {str(e)}")]
+        ]
+        
+        # Prepare filter_dict for personalization
+        filter_dict = None
+        if enable_personalization and user_id != "anonymous":
+            # You could add user-specific tags here if available
+            filter_dict = {"user_id": user_id}
+        
+        # Call the new search_knowledge_base method
+        search_results = await self._search_knowledge_base(
+            request_id=request_id,
+            query=query,
+            top_k=max_results,
+            filter_dict=filter_dict,
+            include_metadata=True,
+        )
+        
+        # Combine deprecation warning with search results
+        return deprecation_warning + search_results
 
     async def _get_search_analytics(
         self,
@@ -3126,222 +2919,58 @@ class RAGMCPServer:
         time_period: str = "week",
         include_recommendations: bool = True,
     ) -> List[TextContent]:
-        """Get search analytics dashboard data."""
-        try:
-            optimizer = await self._get_search_optimizer()
-            if not optimizer:
-                return [TextContent(type="text", text="❌ **Search optimizer not available**")]
-            
-            dashboard_data = optimizer.get_analytics_dashboard()
-            
-            if "error" in dashboard_data:
-                return [TextContent(type="text", text=f"❌ **Analytics error:** {dashboard_data['error']}")]
-            
-            # Format response based on analytics type
-            if analytics_type == "overview":
-                overview = dashboard_data.get('overview', {})
-                if 'no_data' in overview:
-                    return [TextContent(type="text", text="📊 **No analytics data available yet**")]
-                
-                response = f"""📊 **Search Analytics Overview**
-
-**Query Statistics:**
-• Total queries: {overview.get('total_queries', 0)}
-• Daily queries: {overview.get('daily_queries', 0)}
-• Weekly queries: {overview.get('weekly_queries', 0)}
-• Unique users: {overview.get('unique_users', 0)}
-
-**Performance Metrics:**
-• Average response time: {overview.get('avg_response_time', 0):.3f}s
-• Click-through rate: {overview.get('click_through_rate', 0):.1%}
-• Average dwell time: {overview.get('avg_dwell_time', 0):.2f}s
-• Queries per user: {overview.get('queries_per_user', 0):.2f}
-"""
-                
-            elif analytics_type == "query_analytics":
-                query_data = dashboard_data.get('query_analytics', {})
-                if 'no_data' in query_data:
-                    return [TextContent(type="text", text="📊 **No query analytics data available yet**")]
-                
-                response = f"""📊 **Query Analytics**
-
-**Query Types:**
-{chr(10).join(f'• {qtype}: {count}' for qtype, count in query_data.get('query_types', {}).items())}
-
-**Search Intents:**
-{chr(10).join(f'• {intent}: {count}' for intent, count in query_data.get('intents', {}).items())}
-
-**Performance:**
-• Average complexity: {query_data.get('avg_complexity', 0):.3f}
-• Failure rate: {query_data.get('failure_rate', 0):.1%}
-• Average query length: {query_data.get('avg_query_length', 0):.2f} words
-
-**Popular Queries:**
-{chr(10).join(f'• {query}: {count}' for query, count in query_data.get('popular_queries', [])[:5])}
-"""
-                
-            elif analytics_type == "user_behavior":
-                user_data = dashboard_data.get('user_behavior', {})
-                if 'no_data' in user_data:
-                    return [TextContent(type="text", text="📊 **No user behavior data available yet**")]
-                
-                response = f"""📊 **User Behavior Analytics**
-
-**Session Statistics:**
-• Average session length: {user_data.get('avg_session_length', 0):.2f} queries
-• Average session duration: {user_data.get('avg_session_duration', 0):.2f}s
-• Total sessions: {user_data.get('total_sessions', 0)}
-• Returning users: {user_data.get('returning_users', 0)}
-
-**Engagement Metrics:**
-• Engagement rate: {user_data.get('engagement_rate', 0):.1%}
-• Bounce rate: {user_data.get('bounce_rate', 0):.1%}
-• Average click position: {user_data.get('avg_click_position', 0):.2f}
-"""
-                
-            elif analytics_type == "performance":
-                perf_data = dashboard_data.get('performance', {})
-                if 'no_data' in perf_data:
-                    return [TextContent(type="text", text="📊 **No performance data available yet**")]
-                
-                response = f"""📊 **Performance Analytics**
-
-**Overall Performance:**
-• Success rate: {perf_data.get('success_rate', 0):.1%}
-• Average response time: {perf_data.get('avg_response_time', 0):.3f}s
-• Total operations: {perf_data.get('total_operations', 0)}
-
-**Response Time Distribution:**
-• Min: {perf_data.get('min_response_time', 0):.3f}s
-• Max: {perf_data.get('max_response_time', 0):.3f}s
-"""
-                
-            else:
-                response = f"📊 **Analytics for {analytics_type}**\n\nDetailed analytics data available. Use specific analytics type for focused insights."
-            
-            # Add recommendations if requested
-            if include_recommendations and 'recommendations' in dashboard_data:
-                recommendations = dashboard_data['recommendations']
-                if recommendations:
-                    response += f"\n\n**💡 Recommendations:**\n"
-                    for rec in recommendations[:3]:  # Show top 3
-                        priority_emoji = "🔴" if rec['priority'] == 'high' else "🟡" if rec['priority'] == 'medium' else "🟢"
-                        response += f"\n{priority_emoji} **{rec['title']}**\n{rec['description']}\n*Action:* {rec['action']}\n"
-            
-            return [TextContent(type="text", text=response)]
-            
-        except Exception as e:
-            self.logger.error(f"[{request_id}] Analytics retrieval failed: {e}")
-            return [TextContent(type="text", text=f"❌ **Error retrieving analytics:** {str(e)}")]
+        """[DEPRECATED] Search analytics functionality."""
+        return [TextContent(
+            type="text", 
+            text=(
+                "⚠️ **DEPRECATED:** Search analytics functionality has been deprecated. "
+                "The SearchOptimizer has been replaced with RAGEngine, which provides "
+                "built-in search optimization without requiring separate analytics tracking. "
+                "Use the enhanced search_knowledge_base tool instead."
+            )
+        )]
 
     async def _track_user_feedback(
         self,
         request_id: str,
         user_id: str,
         query: str,
-        clicked_results: List[str] = None,
-        dwell_times: Dict[str, float] = None,
-        feedback_scores: Dict[str, int] = None,
+        clicked_results: Optional[List[str]] = None,
+        dwell_times: Optional[Dict[str, float]] = None,
+        feedback_scores: Optional[Dict[str, float]] = None,
     ) -> List[TextContent]:
-        """Track user feedback for personalization."""
-        try:
-            optimizer = await self._get_search_optimizer()
-            if not optimizer:
-                return [TextContent(type="text", text="❌ **Search optimizer not available**")]
-            
-            clicked_results = clicked_results or []
-            dwell_times = dwell_times or {}
-            feedback_scores = feedback_scores or {}
-            
-            # Track feedback
-            optimizer.track_user_feedback(
-                user_id=user_id,
-                query=query,
-                clicked_results=clicked_results,
-                dwell_times=dwell_times,
-                feedback_scores=feedback_scores
+        """[DEPRECATED] User feedback tracking functionality."""
+        return [TextContent(
+            type="text", 
+            text=(
+                "⚠️ **DEPRECATED:** User feedback tracking has been deprecated. "
+                "The SearchOptimizer has been replaced with RAGEngine, which provides "
+                "built-in search optimization without requiring manual feedback tracking. "
+                "Use the enhanced search_knowledge_base tool instead."
             )
-            
-            # Update document usage analytics
-            for doc_id in clicked_results:
-                if doc_id in self._document_usage:
-                    self._document_usage[doc_id]["access_count"] += 1
-                    self._document_usage[doc_id]["last_accessed"] = datetime.now().isoformat()
-            
-            response = f"""✅ **User Feedback Tracked**
-
-**User:** {user_id}
-**Query:** {query}
-**Clicked Results:** {len(clicked_results)}
-**Dwell Time Data:** {len(dwell_times)} documents
-**Feedback Scores:** {len(feedback_scores)} documents
-
-**Summary:**
-• Average dwell time: {sum(dwell_times.values()) / len(dwell_times):.2f}s
-• Average feedback score: {sum(feedback_scores.values()) / len(feedback_scores):.2f}
-• Personalization data updated for future searches
-"""
-            
-            return [TextContent(type="text", text=response)]
-            
-        except Exception as e:
-            self.logger.error(f"[{request_id}] Feedback tracking failed: {e}")
-            return [TextContent(type="text", text=f"❌ **Error tracking feedback:** {str(e)}")]
+        )]
 
     async def _create_ab_test(
         self,
         request_id: str,
         experiment_id: str,
         name: str,
-        description: str,
-        variant_a: Dict[str, Any],
-        variant_b: Dict[str, Any],
+        control_strategy: str = "hybrid_balanced",
+        test_strategy: str = "personalized",
         traffic_split: float = 0.5,
         duration_days: int = 7,
-        success_metric: str = "click_through_rate",
+        success_metrics: Optional[List[str]] = None,
     ) -> List[TextContent]:
-        """Create A/B test experiment."""
-        try:
-            optimizer = await self._get_search_optimizer()
-            if not optimizer:
-                return [TextContent(type="text", text="❌ **Search optimizer not available**")]
-            
-            # Create A/B test
-            optimizer.create_ab_test(
-                experiment_id=experiment_id,
-                name=name,
-                description=description,
-                variant_a=variant_a,
-                variant_b=variant_b,
-                traffic_split=traffic_split,
-                duration_days=duration_days,
-                success_metric=success_metric
+        """[DEPRECATED] A/B testing functionality."""
+        return [TextContent(
+            type="text", 
+            text=(
+                "⚠️ **DEPRECATED:** A/B testing functionality has been deprecated. "
+                "The SearchOptimizer has been replaced with RAGEngine, which provides "
+                "optimized search results without requiring A/B testing configuration. "
+                "Use the enhanced search_knowledge_base tool instead."
             )
-            
-            response = f"""🧪 **A/B Test Created Successfully**
-
-**Experiment Details:**
-• ID: {experiment_id}
-• Name: {name}
-• Description: {description}
-• Duration: {duration_days} days
-• Traffic Split: {traffic_split * 100:.1f}% / {(1 - traffic_split) * 100:.1f}%
-• Success Metric: {success_metric}
-
-**Variant A (Control):**
-{chr(10).join(f'• {key}: {value}' for key, value in variant_a.items())}
-
-**Variant B (Test):**
-{chr(10).join(f'• {key}: {value}' for key, value in variant_b.items())}
-
-**Status:** Active - experiment is now running
-"""
-            
-            return [TextContent(type="text", text=response)]
-            
-        except Exception as e:
-            self.logger.error(f"[{request_id}] A/B test creation failed: {e}")
-            return [TextContent(type="text", text=f"❌ **Error creating A/B test:** {str(e)}")]
+        )]
 
     async def _get_ab_test_results(
         self,
@@ -3349,100 +2978,46 @@ class RAGMCPServer:
         experiment_id: str = None,
         include_details: bool = True,
     ) -> List[TextContent]:
-        """Get A/B test results."""
-        try:
-            optimizer = await self._get_search_optimizer()
-            if not optimizer:
-                return [TextContent(type="text", text="❌ **Search optimizer not available**")]
-            
-            results = optimizer.get_ab_test_results()
-            
-            if "error" in results:
-                return [TextContent(type="text", text=f"❌ **A/B test error:** {results['error']}")]
-            
-            if experiment_id:
-                # Get specific experiment results
-                if experiment_id in results['experiments']:
-                    exp_data = results['experiments'][experiment_id]
-                    
-                    response = f"""🧪 **A/B Test Results: {experiment_id}**
-
-**Experiment:** {exp_data['name']}
-**Status:** {exp_data['status']}
-**Duration:** {exp_data['start_date']} to {exp_data['end_date']}
-**Has Results:** {'Yes' if exp_data['has_results'] else 'No'}
-**Winner:** {exp_data['winner'] or 'No significant difference'}
-"""
-                else:
-                    response = f"❌ **Experiment not found:** {experiment_id}"
-            else:
-                # Get summary of all experiments
-                response = f"""🧪 **A/B Test Summary**
-
-**Overview:**
-• Total experiments: {results['total_experiments']}
-• Active experiments: {results['active_experiments']}
-• Completed experiments: {results['completed_experiments']}
-
-**Experiments:**
-"""
-                
-                for exp_id, exp_data in results['experiments'].items():
-                    status_emoji = "🟢" if exp_data['status'] == 'active' else "🔵" if exp_data['status'] == 'completed' else "⚪"
-                    winner_text = f" (Winner: {exp_data['winner']})" if exp_data['winner'] else ""
-                    response += f"\n{status_emoji} **{exp_id}:** {exp_data['name']}{winner_text}"
-            
-            return [TextContent(type="text", text=response)]
-            
-        except Exception as e:
-            self.logger.error(f"[{request_id}] A/B test results retrieval failed: {e}")
-            return [TextContent(type="text", text=f"❌ **Error retrieving A/B test results:** {str(e)}")]
+        """[DEPRECATED] A/B test results functionality."""
+        return [TextContent(
+            type="text", 
+            text=(
+                "⚠️ **DEPRECATED:** A/B test results functionality has been deprecated. "
+                "The SearchOptimizer has been replaced with RAGEngine, which provides "
+                "optimized search results without requiring A/B testing. "
+                "Use the enhanced search_knowledge_base tool instead."
+            )
+        )]
 
     def _validate_startup_dependencies(self) -> None:
         """
         Validate startup configuration and check dependencies.
 
         Raises:
-            ConfigurationError: If configuration validation fails
-            ImportError: If required dependencies are missing
+            ConfigurationError: If required configuration is missing
         """
         self.logger.info("Validating startup dependencies...")
 
-        # Validate configuration
-        try:
-            config.validate()
-            self.logger.info("Configuration validation passed")
-        except ConfigurationError as e:
-            self.logger.error(f"Configuration validation failed: {e}")
-            raise
+        # Check vector store path
+        if not config.VECTOR_STORE_PATH:
+            raise ConfigurationError("VECTOR_STORE_PATH is required")
 
-        # Check required dependencies
-        required_modules = [
-            ("mcp.server", "Model Context Protocol server"),
-            ("mcp.server.stdio", "MCP stdio server"),
-            ("mcp.types", "MCP types"),
-        ]
+        # Create vector store directory if it doesn't exist
+        vector_store_path = Path(config.VECTOR_STORE_PATH)
+        vector_store_path.mkdir(parents=True, exist_ok=True)
+        self.logger.info(f"Vector store path: {vector_store_path}")
 
-        missing_modules = []
-        for module_name, description in required_modules:
-            try:
-                __import__(module_name)
-                self.logger.debug(f"✓ {description} available")
-            except ImportError:
-                missing_modules.append((module_name, description))
-                self.logger.error(f"✗ {description} missing")
-
-        if missing_modules:
-            error_msg = "Missing required dependencies:\n" + "\n".join(
-                f"  - {desc} ({module})" for module, desc in missing_modules
-            )
-            raise ImportError(error_msg)
-
-        # Validate API keys are present (if web search will be used)
-        if not config.TAVILY_API_KEY:
+        # Check OpenAI API key (optional for basic functionality)
+        if not config.OPENAI_API_KEY:
             self.logger.warning(
-                "TAVILY_API_KEY not configured - web search will be unavailable"
+                "OpenAI API key not configured - some features may be limited"
             )
+        else:
+            self.logger.info("OpenAI API key configured - enhanced features available")
+
+        # Check Tavily API key (optional for web search)
+        if not config.TAVILY_API_KEY:
+            self.logger.warning("Tavily API key not configured - web search disabled")
         else:
             self.logger.info("Tavily API key configured - web search available")
 
@@ -3461,21 +3036,23 @@ class RAGMCPServer:
             # Validate startup dependencies
             self._validate_startup_dependencies()
 
-            self.logger.info("RAG MCP Server initialized successfully")
-            self.logger.info(f"Environment: {config.ENVIRONMENT}")
-            self.logger.info(f"Log level: {config.LOG_LEVEL}")
+            # Create stdio transport and server
+            from mcp import ClientSession, StdioServerTransport
+            from mcp.server.stdio import stdio_server
 
-            # Run the server with stdio transport
+            # Initialize server
             async with stdio_server() as (read_stream, write_stream):
-                self.logger.info("Server running on stdio transport...")
+                self.logger.info("Server started successfully, listening for MCP requests...")
+                
+                # Run the server until shutdown
                 await self.server.run(
                     read_stream,
                     write_stream,
-                    self.server.create_initialization_options(),
+                    self.server.create_initialization_options()
                 )
 
         except KeyboardInterrupt:
-            self.logger.info("Received keyboard interrupt, shutting down...")
+            self.logger.info("Received shutdown signal, stopping server...")
         except Exception as e:
             self.logger.error(f"Fatal error in server: {e}", exc_info=True)
             raise
