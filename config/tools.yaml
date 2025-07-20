@@ -1,0 +1,166 @@
+tools:
+  search_knowledge_base:
+    description: |
+      Search the local vector knowledge base for relevant information. 
+      This tool performs semantic similarity search across stored documents 
+      and returns the most relevant results based on the query.
+    inputSchema:
+      type: object
+      properties:
+        query:
+          type: string
+          description: The search query to find relevant information
+          minLength: 1
+          maxLength: 1000
+        top_k:
+          type: integer
+          description: Number of results to return
+          minimum: 1
+          maximum: 20
+          default: 5
+        filter_dict:
+          type: object
+          description: Optional metadata filters for search results
+          additionalProperties: true
+          default: null
+        include_metadata:
+          type: boolean
+          description: Whether to include document metadata in results
+          default: true
+      required:
+        - query
+      additionalProperties: false
+
+  web_search:
+    description: |
+      Search the web using Tavily API for current and comprehensive information. 
+      This tool is ideal for finding recent information, news, or data not 
+      available in the local knowledge base.
+    inputSchema:
+      type: object
+      properties:
+        query:
+          type: string
+          description: The search query for web search
+          minLength: 1
+          maxLength: 400
+        max_results:
+          type: integer
+          description: Maximum number of web results to return
+          minimum: 1
+          maximum: 20
+          default: 5
+        search_depth:
+          type: string
+          description: Depth of search results
+          enum: ["basic", "advanced"]
+          default: basic
+        include_answer:
+          type: boolean
+          description: Whether to include AI-generated answer summary
+          default: true
+        include_raw_content:
+          type: boolean
+          description: Whether to include raw content from sources
+          default: false
+        exclude_domains:
+          type: array
+          items:
+            type: string
+            pattern: "^[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+          description: List of domains to exclude from search results
+          maxItems: 10
+          default: []
+      required:
+        - query
+      additionalProperties: false
+
+  smart_search:
+    description: |
+      Sophisticated intelligent hybrid search with advanced decision logic. 
+      Searches local knowledge base first, evaluates result quality against threshold, 
+      and intelligently decides whether to supplement with web search. Provides 
+      cross-source deduplication, relevance explanations, confidence scoring, 
+      and source credibility assessment for comprehensive search results.
+    inputSchema:
+      type: object
+      properties:
+        query:
+          type: string
+          description: The search query for intelligent hybrid search
+          minLength: 1
+          maxLength: 1000
+        similarity_threshold:
+          type: number
+          description: "Threshold value for triggering web search (0.0-1.0). If max local score < threshold, web search is triggered"
+          minimum: 0.0
+          maximum: 1.0
+          default: 0.75
+        local_top_k:
+          type: integer
+          description: Maximum results to retrieve from local knowledge base
+          minimum: 1
+          maximum: 20
+          default: 5
+        web_max_results:
+          type: integer
+          description: Maximum results to retrieve from web search if triggered
+          minimum: 0
+          maximum: 20
+          default: 5
+        include_sources:
+          type: boolean
+          description: Whether to include detailed source information for all results
+          default: true
+        combine_strategy:
+          type: string
+          description: Strategy for combining and ranking results from multiple sources
+          enum: ["interleave", "local_first", "relevance_score"]
+          default: relevance_score
+        min_local_results:
+          type: integer
+          description: Minimum local results needed before considering web search sufficient
+          minimum: 0
+          maximum: 10
+          default: 2
+      required:
+        - query
+      additionalProperties: false
+
+  add_document:
+    description: |
+      Add a document to the knowledge base. Supports both file paths and raw content. 
+      Automatically detects file type and processes the document with intelligent chunking. 
+      Returns document ID and processing statistics. Supports batch additions.
+    inputSchema:
+      type: object
+      properties:
+        content:
+          type: string
+          description: Raw text content (alternative to file_path)
+          minLength: 1
+        file_path:
+          type: string
+          description: Path to file to process (alternative to content)
+        metadata:
+          type: object
+          description: Additional metadata for the document
+          additionalProperties: true
+          default: {}
+        tags:
+          type: array
+          items:
+            type: string
+          description: Tags to associate with the document
+          default: []
+        batch_files:
+          type: array
+          items:
+            type: string
+          description: Multiple file paths for batch processing (alternative to single file)
+          default: []
+      oneOf:
+        - required: ["content"]
+        - required: ["file_path"] 
+        - required: ["batch_files"]
+      additionalProperties: false

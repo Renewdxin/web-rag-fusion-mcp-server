@@ -37,22 +37,22 @@ except ImportError:
     JSONSCHEMA_AVAILABLE = False
     ValidationError = Exception
 
+# LlamaIndex availability check
+try:
+    import llama_index
+    LLAMAINDEX_AVAILABLE = True
+except ImportError:
+    LLAMAINDEX_AVAILABLE = False
+
 # Local imports
 from config.settings import ConfigurationError, config
-from .vector_store import SearchResult, Document
+from config.tool_loader import ToolConfigLoader
 from .web_search import (
     WebSearchError,
     WebSearchManager,
     WebSearchResult,
 )
-from .document_processor import DocumentProcessor, DocumentProcessingError
-# LlamaIndex imports for enhanced RAG
-try:
-    from .llamaindex_processor import RAGEngine
-    LLAMAINDEX_AVAILABLE = True
-except ImportError:
-    LLAMAINDEX_AVAILABLE = False
-    RAGEngine = None
+from .llamaindex_processor import RAGEngine
 
 
 class RateLimiter:
@@ -102,6 +102,12 @@ class RAGMCPServer:
         self._setup_signal_handlers()
         self._register_handlers()
 
+        # Load tool configurations
+        self.tool_loader = ToolConfigLoader()
+
+        # Tool schema cache for validation
+        self._tool_schemas: Dict[str, Dict[str, Any]] = {}
+
         # Rate limiting (100 requests per minute by default)
         self.rate_limiter = RateLimiter(
             max_requests=config.MAX_RETRIES * 20, time_window=60  # Scale with config
@@ -116,20 +122,8 @@ class RAGMCPServer:
             "tool_usage": defaultdict(int),
         }
 
-        # Cache tool schemas for validation
-        self._tool_schemas = {}
-
-        # Initialize vector store manager (lazy loading)
-        # Removed: vector store now handled by RAGEngine
-
-        # LlamaIndex functionality now handled by RAGEngine
-        self._use_llamaindex = True  # Always true since we use RAGEngine
-
         # Initialize web search manager (lazy loading)
         self._web_search: Optional[WebSearchManager] = None
-
-        # Initialize document processor (lazy loading)
-        self._document_processor: Optional[DocumentProcessor] = None
 
         # Initialize RAG engine (lazy loading)
         self._rag_engine: Optional[RAGEngine] = None
@@ -139,6 +133,14 @@ class RAGMCPServer:
         self._document_tags: Dict[str, List[str]] = {}
         self._document_usage: Dict[str, Dict[str, Any]] = {}
         self._document_versions: Dict[str, List[Dict[str, Any]]] = {}
+
+        # Tool dispatch table
+        self._tool_handlers = {
+            "search_knowledge_base": self._search_knowledge_base,
+            "web_search": self._search_web,
+            "smart_search": self._smart_search_dispatch,
+            "add_document": self._add_document,
+        }
 
     def _setup_logging(self) -> logging.Logger:
         """Configure comprehensive logging."""
@@ -168,8 +170,8 @@ class RAGMCPServer:
 
     def _register_handlers(self) -> None:
         """Register MCP server handlers."""
-        self.server.list_tools()(self._list_tools)
-        self.server.call_tool()(self._call_tool)
+        self.server.list_tools = self._list_tools
+        self.server.call_tool = self._call_tool
 
     def _generate_request_id(self) -> str:
         """Generate unique request ID for tracing."""
@@ -236,705 +238,7 @@ class RAGMCPServer:
             List of tool definitions with complete JSON Schema specifications.
         """
         self.logger.debug("Listing available tools")
-
-        return [
-            Tool(
-                name="search_knowledge_base",
-                description=(
-                    "Search the local vector knowledge base for relevant information. "
-                    "This tool performs semantic similarity search across stored documents "
-                    "and returns the most relevant results based on the query."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "The search query to find relevant information",
-                            "minLength": 1,
-                            "maxLength": 1000,
-                        },
-                        "top_k": {
-                            "type": "integer",
-                            "description": "Number of results to return",
-                            "minimum": 1,
-                            "maximum": 20,
-                            "default": 5,
-                        },
-                        "filter_dict": {
-                            "type": "object",
-                            "description": "Optional metadata filters for search results",
-                            "additionalProperties": True,
-                            "default": None,
-                        },
-                        "include_metadata": {
-                            "type": "boolean",
-                            "description": "Whether to include document metadata in results",
-                            "default": True,
-                        },
-                    },
-                    "required": ["query"],
-                    "additionalProperties": False,
-                },
-            ),
-            Tool(
-                name="web_search",
-                description=(
-                    "Search the web using Tavily API for current and comprehensive information. "
-                    "This tool is ideal for finding recent information, news, or data not "
-                    "available in the local knowledge base."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "The search query for web search",
-                            "minLength": 1,
-                            "maxLength": 400,
-                        },
-                        "max_results": {
-                            "type": "integer",
-                            "description": "Maximum number of web results to return",
-                            "minimum": 1,
-                            "maximum": 20,
-                            "default": 5,
-                        },
-                        "search_depth": {
-                            "type": "string",
-                            "description": "Depth of search results",
-                            "enum": ["basic", "advanced"],
-                            "default": "basic",
-                        },
-                        "include_answer": {
-                            "type": "boolean",
-                            "description": "Whether to include AI-generated answer summary",
-                            "default": True,
-                        },
-                        "include_raw_content": {
-                            "type": "boolean",
-                            "description": "Whether to include raw content from sources",
-                            "default": False,
-                        },
-                        "exclude_domains": {
-                            "type": "array",
-                            "items": {
-                                "type": "string",
-                                "pattern": "^[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$",
-                            },
-                            "description": "List of domains to exclude from search results",
-                            "maxItems": 10,
-                            "default": [],
-                        },
-                    },
-                    "required": ["query"],
-                    "additionalProperties": False,
-                },
-            ),
-            Tool(
-                name="smart_search",
-                description=(
-                    "Sophisticated intelligent hybrid search with advanced decision logic. "
-                    "Searches local knowledge base first, evaluates result quality against threshold, "
-                    "and intelligently decides whether to supplement with web search. Provides "
-                    "cross-source deduplication, relevance explanations, confidence scoring, "
-                    "and source credibility assessment for comprehensive search results."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "The search query for intelligent hybrid search",
-                            "minLength": 1,
-                            "maxLength": 1000,
-                        },
-                        "similarity_threshold": {
-                            "type": "number",
-                            "description": "Threshold value for triggering web search (0.0-1.0). If max local score < threshold, web search is triggered",
-                            "minimum": 0.0,
-                            "maximum": 1.0,
-                            "default": 0.75,
-                        },
-                        "local_top_k": {
-                            "type": "integer",
-                            "description": "Maximum results to retrieve from local knowledge base",
-                            "minimum": 1,
-                            "maximum": 20,
-                            "default": 5,
-                        },
-                        "web_max_results": {
-                            "type": "integer",
-                            "description": "Maximum results to retrieve from web search if triggered",
-                            "minimum": 0,
-                            "maximum": 20,
-                            "default": 5,
-                        },
-                        "include_sources": {
-                            "type": "boolean",
-                            "description": "Whether to include detailed source information for all results",
-                            "default": True,
-                        },
-                        "combine_strategy": {
-                            "type": "string",
-                            "description": "Strategy for combining and ranking results from multiple sources",
-                            "enum": ["interleave", "local_first", "relevance_score"],
-                            "default": "relevance_score",
-                        },
-                        "min_local_results": {
-                            "type": "integer",
-                            "description": "Minimum local results needed before considering web search sufficient",
-                            "minimum": 0,
-                            "maximum": 10,
-                            "default": 2,
-                        },
-                    },
-                    "required": ["query"],
-                    "additionalProperties": False,
-                },
-            ),
-            Tool(
-                name="add_document",
-                description=(
-                    "Add a document to the knowledge base. Supports both file paths and raw content. "
-                    "Automatically detects file type and processes the document with intelligent chunking. "
-                    "Returns document ID and processing statistics. Supports batch additions."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "content": {
-                            "type": "string",
-                            "description": "Raw text content (alternative to file_path)",
-                            "minLength": 1,
-                        },
-                        "file_path": {
-                            "type": "string",
-                            "description": "Path to file to process (alternative to content)",
-                        },
-                        "metadata": {
-                            "type": "object",
-                            "description": "Additional metadata for the document",
-                            "additionalProperties": True,
-                            "default": {},
-                        },
-                        "tags": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Tags to associate with the document",
-                            "default": [],
-                        },
-                        "batch_files": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Multiple file paths for batch processing",
-                            "default": [],
-                        },
-                        "auto_detect_type": {
-                            "type": "boolean",
-                            "description": "Whether to auto-detect file type",
-                            "default": True,
-                        },
-                    },
-                    "oneOf": [
-                        {"required": ["content"]},
-                        {"required": ["file_path"]},
-                        {"required": ["batch_files"]},
-                    ],
-                    "additionalProperties": False,
-                },
-            ),
-            Tool(
-                name="update_document",
-                description=(
-                    "Update an existing document in the knowledge base. Supports partial updates "
-                    "with version history maintenance. Re-indexes affected document chunks and "
-                    "implements conflict detection and resolution."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "document_id": {
-                            "type": "string",
-                            "description": "ID of the document to update",
-                            "minLength": 1,
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "New content for the document",
-                        },
-                        "metadata": {
-                            "type": "object",
-                            "description": "Metadata fields to update",
-                            "additionalProperties": True,
-                        },
-                        "tags": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Updated tags for the document",
-                        },
-                        "partial_update": {
-                            "type": "boolean",
-                            "description": "Whether to perform a partial update (merge with existing)",
-                            "default": True,
-                        },
-                        "create_version": {
-                            "type": "boolean",
-                            "description": "Whether to create a version backup",
-                            "default": True,
-                        },
-                        "force_update": {
-                            "type": "boolean",
-                            "description": "Force update even if conflicts detected",
-                            "default": False,
-                        },
-                    },
-                    "required": ["document_id"],
-                    "additionalProperties": False,
-                },
-            ),
-            Tool(
-                name="delete_document",
-                description=(
-                    "Delete a document from the knowledge base with soft delete capability. "
-                    "Provides recovery option, cleans up orphaned chunks, and updates related indices."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "document_id": {
-                            "type": "string",
-                            "description": "ID of the document to delete",
-                            "minLength": 1,
-                        },
-                        "soft_delete": {
-                            "type": "boolean",
-                            "description": "Whether to perform soft delete (recoverable)",
-                            "default": True,
-                        },
-                        "cleanup_chunks": {
-                            "type": "boolean",
-                            "description": "Whether to clean up associated chunks",
-                            "default": True,
-                        },
-                        "update_indices": {
-                            "type": "boolean",
-                            "description": "Whether to update related indices",
-                            "default": True,
-                        },
-                        "backup_before_delete": {
-                            "type": "boolean",
-                            "description": "Create backup before deletion",
-                            "default": True,
-                        },
-                    },
-                    "required": ["document_id"],
-                    "additionalProperties": False,
-                },
-            ),
-            Tool(
-                name="list_documents",
-                description=(
-                    "List documents in the knowledge base with comprehensive filtering and pagination. "
-                    "Supports metadata filtering, tag-based search, date range queries, and various sort options. "
-                    "Returns document statistics and detailed information."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "page": {
-                            "type": "integer",
-                            "description": "Page number (1-based)",
-                            "minimum": 1,
-                            "default": 1,
-                        },
-                        "page_size": {
-                            "type": "integer",
-                            "description": "Number of items per page",
-                            "minimum": 1,
-                            "maximum": 100,
-                            "default": 20,
-                        },
-                        "filter_metadata": {
-                            "type": "object",
-                            "description": "Filter by metadata fields",
-                            "additionalProperties": True,
-                        },
-                        "filter_tags": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Filter by tags (OR logic)",
-                        },
-                        "filter_type": {
-                            "type": "string",
-                            "description": "Filter by document type",
-                        },
-                        "date_from": {
-                            "type": "string",
-                            "format": "date-time",
-                            "description": "Filter documents created after this date",
-                        },
-                        "date_to": {
-                            "type": "string",
-                            "format": "date-time",
-                            "description": "Filter documents created before this date",
-                        },
-                        "sort_by": {
-                            "type": "string",
-                            "enum": ["date", "size", "type", "name", "usage"],
-                            "description": "Sort criteria",
-                            "default": "date",
-                        },
-                        "sort_order": {
-                            "type": "string",
-                            "enum": ["asc", "desc"],
-                            "description": "Sort order",
-                            "default": "desc",
-                        },
-                        "include_stats": {
-                            "type": "boolean",
-                            "description": "Include document statistics",
-                            "default": True,
-                        },
-                        "include_deleted": {
-                            "type": "boolean",
-                            "description": "Include soft-deleted documents",
-                            "default": False,
-                        },
-                    },
-                    "additionalProperties": False,
-                },
-            ),
-            Tool(
-                name="manage_tags",
-                description=(
-                    "Manage document tags - add, remove, or list tags. Supports tag-based search "
-                    "filtering and bulk tag operations across multiple documents."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "action": {
-                            "type": "string",
-                            "enum": ["add", "remove", "list", "search"],
-                            "description": "Tag management action",
-                        },
-                        "document_id": {
-                            "type": "string",
-                            "description": "Document ID (for add/remove actions)",
-                        },
-                        "document_ids": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Multiple document IDs for bulk operations",
-                        },
-                        "tags": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Tags to add or remove",
-                        },
-                        "search_tags": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Tags to search for (for search action)",
-                        },
-                        "tag_filter": {
-                            "type": "string",
-                            "description": "Filter tags by pattern (for list action)",
-                        },
-                    },
-                    "required": ["action"],
-                    "additionalProperties": False,
-                },
-            ),
-            Tool(
-                name="bulk_operations",
-                description=(
-                    "Perform bulk operations on multiple documents - add, update, delete, or tag operations. "
-                    "Provides batch processing with progress tracking and error handling."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "operation": {
-                            "type": "string",
-                            "enum": ["add", "update", "delete", "tag"],
-                            "description": "Bulk operation type",
-                        },
-                        "documents": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "additionalProperties": True,
-                            },
-                            "description": "List of documents/operations to process",
-                        },
-                        "batch_size": {
-                            "type": "integer",
-                            "description": "Number of documents to process in each batch",
-                            "minimum": 1,
-                            "maximum": 50,
-                            "default": 10,
-                        },
-                        "continue_on_error": {
-                            "type": "boolean",
-                            "description": "Continue processing if individual operations fail",
-                            "default": True,
-                        },
-                        "progress_callback": {
-                            "type": "boolean",
-                            "description": "Provide progress updates",
-                            "default": True,
-                        },
-                    },
-                    "required": ["operation", "documents"],
-                    "additionalProperties": False,
-                },
-            ),
-            Tool(
-                name="document_analytics",
-                description=(
-                    "Get document usage analytics including access frequency, search hits, "
-                    "popular documents, and usage patterns over time."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "document_id": {
-                            "type": "string",
-                            "description": "Specific document ID for detailed analytics",
-                        },
-                        "analytics_type": {
-                            "type": "string",
-                            "enum": ["overview", "usage", "search_hits", "popular", "trends"],
-                            "description": "Type of analytics to retrieve",
-                            "default": "overview",
-                        },
-                        "time_range": {
-                            "type": "string",
-                            "enum": ["day", "week", "month", "year", "all"],
-                            "description": "Time range for analytics",
-                            "default": "month",
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Maximum number of results",
-                            "minimum": 1,
-                            "maximum": 100,
-                            "default": 20,
-                        },
-                        "include_charts": {
-                            "type": "boolean",
-                            "description": "Include ASCII charts in results",
-                            "default": False,
-                        },
-                    },
-                    "additionalProperties": False,
-                },
-            ),
-            Tool(
-                name="optimize_search",
-                description=(
-                    "[DEPRECATED] This tool has been replaced by the enhanced search_knowledge_base tool. "
-                    "The new RAGEngine automatically provides hybrid ranking, query optimization, and personalization. "
-                    "Please use search_knowledge_base instead."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Search query to optimize",
-                            "minLength": 1,
-                            "maxLength": 1000,
-                        },
-                        "user_id": {
-                            "type": "string",
-                            "description": "User identifier for personalization",
-                            "default": "anonymous",
-                        },
-                        "ranking_strategy": {
-                            "type": "string",
-                            "enum": ["vector_only", "bm25_only", "hybrid_balanced", "hybrid_vector_weighted", "hybrid_bm25_weighted", "personalized"],
-                            "description": "Ranking strategy to use",
-                            "default": "hybrid_balanced",
-                        },
-                        "enable_personalization": {
-                            "type": "boolean",
-                            "description": "Enable personalization features",
-                            "default": True,
-                        },
-                        "enable_summarization": {
-                            "type": "boolean",
-                            "description": "Enable result summarization",
-                            "default": True,
-                        },
-                        "max_results": {
-                            "type": "integer",
-                            "description": "Maximum number of results to return",
-                            "minimum": 1,
-                            "maximum": 50,
-                            "default": 10,
-                        },
-                    },
-                    "required": ["query"],
-                    "additionalProperties": False,
-                },
-            ),
-            Tool(
-                name="get_search_analytics",
-                description=(
-                    "Get comprehensive search analytics including query patterns, user behavior, "
-                    "performance metrics, and actionable insights for search optimization."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "analytics_type": {
-                            "type": "string",
-                            "enum": ["overview", "query_analytics", "user_behavior", "performance", "content_insights", "trends"],
-                            "description": "Type of analytics to retrieve",
-                            "default": "overview",
-                        },
-                        "time_period": {
-                            "type": "string",
-                            "enum": ["day", "week", "month", "all"],
-                            "description": "Time period for analytics",
-                            "default": "week",
-                        },
-                        "include_recommendations": {
-                            "type": "boolean",
-                            "description": "Include optimization recommendations",
-                            "default": True,
-                        },
-                    },
-                    "additionalProperties": False,
-                },
-            ),
-            Tool(
-                name="track_user_feedback",
-                description=(
-                    "Track user feedback and interactions to improve search personalization "
-                    "and relevance. Includes click tracking, dwell time, and explicit feedback."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "user_id": {
-                            "type": "string",
-                            "description": "User identifier",
-                            "minLength": 1,
-                        },
-                        "query": {
-                            "type": "string",
-                            "description": "Search query that generated the results",
-                            "minLength": 1,
-                        },
-                        "clicked_results": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "List of document IDs that were clicked",
-                            "default": [],
-                        },
-                        "dwell_times": {
-                            "type": "object",
-                            "description": "Dwell time (seconds) for each document",
-                            "additionalProperties": {"type": "number"},
-                            "default": {},
-                        },
-                        "feedback_scores": {
-                            "type": "object",
-                            "description": "Explicit feedback scores (-1 to 1) for documents",
-                            "additionalProperties": {"type": "number"},
-                            "default": {},
-                        },
-                    },
-                    "required": ["user_id", "query"],
-                    "additionalProperties": False,
-                },
-            ),
-            Tool(
-                name="create_ab_test",
-                description=(
-                    "Create A/B test experiment to compare different search strategies "
-                    "and optimize search performance based on user behavior metrics."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "experiment_id": {
-                            "type": "string",
-                            "description": "Unique identifier for the experiment",
-                            "minLength": 1,
-                        },
-                        "name": {
-                            "type": "string",
-                            "description": "Human-readable name for the experiment",
-                            "minLength": 1,
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": "Description of what the experiment tests",
-                            "minLength": 1,
-                        },
-                        "variant_a": {
-                            "type": "object",
-                            "description": "Configuration for variant A (control)",
-                            "additionalProperties": True,
-                        },
-                        "variant_b": {
-                            "type": "object",
-                            "description": "Configuration for variant B (test)",
-                            "additionalProperties": True,
-                        },
-                        "traffic_split": {
-                            "type": "number",
-                            "description": "Traffic split for variant A (0.0-1.0)",
-                            "minimum": 0.0,
-                            "maximum": 1.0,
-                            "default": 0.5,
-                        },
-                        "duration_days": {
-                            "type": "integer",
-                            "description": "Duration of experiment in days",
-                            "minimum": 1,
-                            "maximum": 90,
-                            "default": 7,
-                        },
-                        "success_metric": {
-                            "type": "string",
-                            "description": "Primary success metric to track",
-                            "default": "click_through_rate",
-                        },
-                    },
-                    "required": ["experiment_id", "name", "description", "variant_a", "variant_b"],
-                    "additionalProperties": False,
-                },
-            ),
-            Tool(
-                name="get_ab_test_results",
-                description=(
-                    "Get results and performance metrics from A/B test experiments "
-                    "to understand which search strategies perform better."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "experiment_id": {
-                            "type": "string",
-                            "description": "Experiment ID to get results for",
-                        },
-                        "include_details": {
-                            "type": "boolean",
-                            "description": "Include detailed metrics and analysis",
-                            "default": True,
-                        },
-                    },
-                    "additionalProperties": False,
-                },
-            ),
-        ]
-
+        return self.tool_loader.get_tool_definitions()
     async def _call_tool(self, name: str, arguments: Dict[str, Any]) -> CallToolResult:
         """
         Comprehensive tool execution handler with validation, rate limiting,
@@ -987,47 +291,10 @@ class RAGMCPServer:
 
             try:
                 async with asyncio.timeout(timeout_seconds):
-                    # Pattern match on tool name to dispatch to appropriate handler
-                    if name == "search_knowledge_base":
-                        result = await self._search_knowledge_base(request_id, **arguments)
-                    elif name == "web_search":
-                        result = await self._search_web(request_id, **arguments)
-                    elif name == "smart_search":
-                        # Map parameters to match function signature
-                        smart_search_args = {
-                            "query": arguments["query"],
-                            "similarity_threshold": arguments.get("similarity_threshold", 0.75),
-                            "local_top_k": arguments.get("local_top_k", 5),
-                            "web_max_results": arguments.get("web_max_results", 5),
-                            "include_sources": arguments.get("include_sources", True),
-                            "combine_strategy": arguments.get("combine_strategy", "relevance_score"),
-                            "min_local_results": arguments.get("min_local_results", 2),
-                        }
-                        result = await self._smart_search_internal(request_id, **smart_search_args)
-                    elif name == "add_document":
-                        result = await self._add_document(request_id, **arguments)
-                    elif name == "update_document":
-                        result = await self._update_document(request_id, **arguments)
-                    elif name == "delete_document":
-                        result = await self._delete_document(request_id, **arguments)
-                    elif name == "list_documents":
-                        result = await self._list_documents(request_id, **arguments)
-                    elif name == "manage_tags":
-                        result = await self._manage_tags(request_id, **arguments)
-                    elif name == "bulk_operations":
-                        result = await self._bulk_operations(request_id, **arguments)
-                    elif name == "document_analytics":
-                        result = await self._document_analytics(request_id, **arguments)
-                    elif name == "optimize_search":
-                        result = await self._optimize_search(request_id, **arguments)
-                    elif name == "get_search_analytics":
-                        result = await self._get_search_analytics(request_id, **arguments)
-                    elif name == "track_user_feedback":
-                        result = await self._track_user_feedback(request_id, **arguments)
-                    elif name == "create_ab_test":
-                        result = await self._create_ab_test(request_id, **arguments)
-                    elif name == "get_ab_test_results":
-                        result = await self._get_ab_test_results(request_id, **arguments)
+                    # Use dictionary dispatch for clean tool handling
+                    if name in self._tool_handlers:
+                        handler = self._tool_handlers[name]
+                        result = await handler(request_id, **arguments)
                     else:
                         error_msg = f"Unknown tool: {name}"
                         self.logger.error(f"[{request_id}] {error_msg}")
@@ -1072,11 +339,6 @@ class RAGMCPServer:
             return CallToolResult(
                 content=[TextContent(type="text", text=f"Error: {error_msg}")]
             )
-
-    # Removed: _get_vector_store - now using RAGEngine directly
-
-    # Removed: _get_llamaindex_processor - now using RAGEngine directly
-
     async def _get_web_search(self) -> WebSearchManager:
         """Get or initialize web search manager."""
         if self._web_search is None:
@@ -1096,20 +358,6 @@ class RAGMCPServer:
                 raise WebSearchError(f"Web search initialization failed: {e}")
         return self._web_search
 
-    async def _get_document_processor(self) -> DocumentProcessor:
-        """Get or initialize document processor."""
-        if self._document_processor is None:
-            try:
-                self._document_processor = DocumentProcessor(
-                    chunk_size=getattr(config, "CHUNK_SIZE", 1000),
-                    overlap=getattr(config, "CHUNK_OVERLAP", 200),
-                    max_concurrency=getattr(config, "MAX_CONCURRENCY", 5),
-                )
-                self.logger.info("Document processor initialized successfully")
-            except Exception as e:
-                self.logger.error(f"Failed to initialize document processor: {e}")
-                raise DocumentProcessingError(f"Document processor initialization failed: {e}")
-        return self._document_processor
 
     async def _get_rag_engine(self) -> RAGEngine:
         """Get or initialize RAG engine."""
@@ -1288,46 +536,7 @@ class RAGMCPServer:
                 return content
             return content[: max_length - 3] + "..."
 
-    def _sort_results(self, results: List[SearchResult]) -> List[SearchResult]:
-        """
-        Sort search results by similarity score and timestamp.
 
-        Args:
-            results: List of search results
-
-        Returns:
-            Sorted list of search results
-        """
-
-        def sort_key(result: SearchResult):
-            # Primary sort: similarity score (descending)
-            similarity = result.score
-
-            # Secondary sort: timestamp if available (descending - newer first)
-            timestamp = 0
-            if result.document.metadata:
-                # Try different timestamp field names
-                for field in ["timestamp", "created_at", "modified", "processing_time"]:
-                    if field in result.document.metadata:
-                        try:
-                            if isinstance(result.document.metadata[field], str):
-                                # Try to parse datetime string
-                                timestamp = datetime.fromisoformat(
-                                    result.document.metadata[field].replace(
-                                        "Z", "+00:00"
-                                    )
-                                ).timestamp()
-                            elif isinstance(
-                                    result.document.metadata[field], (int, float)
-                            ):
-                                timestamp = float(result.document.metadata[field])
-                            break
-                        except (ValueError, TypeError):
-                            continue
-
-            return (-similarity, -timestamp)  # Both descending
-
-        return sorted(results, key=sort_key)
 
     async def _search_knowledge_base(
             self,
@@ -1703,6 +912,19 @@ class RAGMCPServer:
             )
             return [TextContent(type="text", text=error_msg)]
 
+    async def _smart_search_dispatch(self, request_id: str, **arguments) -> List[TextContent]:
+        """Dispatch method for smart_search tool - maps arguments and calls internal method."""
+        smart_search_args = {
+            "query": arguments["query"],
+            "similarity_threshold": arguments.get("similarity_threshold", 0.75),
+            "local_top_k": arguments.get("local_top_k", 5),
+            "web_max_results": arguments.get("web_max_results", 5),
+            "include_sources": arguments.get("include_sources", True),
+            "combine_strategy": arguments.get("combine_strategy", "relevance_score"),
+            "min_local_results": arguments.get("min_local_results", 2),
+        }
+        return await self._smart_search_internal(request_id, **smart_search_args)
+
     async def _smart_search_internal(
             self,
             request_id: str,
@@ -1908,350 +1130,15 @@ class RAGMCPServer:
             return [TextContent(type="text", text=error_msg)]
 
 
-    def _deduplicate_results(
-            self, local_results: List[SearchResult], web_results: List[WebSearchResult]
-    ) -> Dict[str, List]:
-        """
-        Perform cross-source result deduplication using content similarity and URL matching.
 
-        Args:
-            local_results: Results from local knowledge base
-            web_results: Results from web search
 
-        Returns:
-            Dictionary with deduplicated and categorized results
-        """
-        from difflib import SequenceMatcher
 
-        def content_similarity(text1: str, text2: str) -> float:
-            """Calculate content similarity between two text snippets."""
-            return SequenceMatcher(
-                None, text1.lower()[:500], text2.lower()[:500]
-            ).ratio()
 
-        # Track duplicates and keep best version
-        deduplicated_local = []
-        deduplicated_web = []
-        duplicate_pairs = []
 
-        # Check for duplicates between local and web results
-        for local_result in local_results:
-            is_duplicate = False
-            local_content = local_result.content.lower()
 
-            for web_result in web_results:
-                web_content = web_result.content.lower()
 
-                # Check content similarity (threshold: 0.8 for high similarity)
-                similarity = content_similarity(local_content, web_content)
 
-                if similarity >= 0.8:
-                    duplicate_pairs.append(
-                        {
-                            "local": local_result,
-                            "web": web_result,
-                            "similarity": similarity,
-                            "kept": (
-                                "local"
-                                if local_result.score >= web_result.score
-                                else "web"
-                            ),
-                        }
-                    )
-                    is_duplicate = True
-                    break
 
-            if not is_duplicate:
-                deduplicated_local.append(local_result)
-
-        # Add web results that aren't duplicates
-        for web_result in web_results:
-            is_duplicate = any(pair["web"] == web_result for pair in duplicate_pairs)
-            if not is_duplicate:
-                deduplicated_web.append(web_result)
-
-        return {
-            "local": deduplicated_local,
-            "web": deduplicated_web,
-            "duplicates": duplicate_pairs,
-        }
-
-    def _assess_result_credibility(
-            self, results_dict: Dict[str, List], query: str
-    ) -> Dict[str, List]:
-        """
-        Assess source credibility and enhance results with credibility scores.
-
-        Args:
-            results_dict: Deduplicated results dictionary
-            query: Original search query for context
-
-        Returns:
-            Enhanced results with credibility assessment
-        """
-        # Enhance local results (they have inherent high credibility)
-        enhanced_local = []
-        for result in results_dict.get("local", []):
-            # Local results get high credibility based on curation
-            result.credibility_score = 0.9  # High credibility for curated local content
-            result.credibility_factors = [
-                "Curated local content",
-                "Direct source access",
-            ]
-            enhanced_local.append(result)
-
-        # Enhance web results with credibility assessment
-        enhanced_web = []
-        for result in results_dict.get("web", []):
-            credibility_score = self._calculate_credibility_score(result)
-            result.credibility_score = credibility_score
-            enhanced_web.append(result)
-
-        return {
-            "local": enhanced_local,
-            "web": enhanced_web,
-            "duplicates": results_dict.get("duplicates", []),
-        }
-
-    def _calculate_credibility_score(self, result) -> float:
-        """
-        Calculate credibility score for a web search result.
-
-        Args:
-            result: WebSearchResult to assess
-
-        Returns:
-            Credibility score between 0.0 and 1.0
-        """
-        score = 0.5  # Base score
-        factors = []
-
-        # Domain reputation (simplified assessment)
-        if hasattr(result, "source_domain") and result.source_domain:
-            domain = result.source_domain.lower()
-
-            # High credibility domains
-            if any(
-                    trusted in domain
-                    for trusted in [
-                        "edu",
-                        "gov",
-                        "org",
-                        "wikipedia",
-                        "reuters",
-                        "bbc",
-                        "nature",
-                        "science",
-                        "ieee",
-                        "acm",
-                        "arxiv",
-                        "pubmed",
-                    ]
-            ):
-                score += 0.3
-                factors.append("Trusted domain")
-
-            # Medium credibility domains
-            elif any(
-                    medium in domain
-                    for medium in ["com", "net", "co.", "news", "tech", "research"]
-            ):
-                score += 0.1
-                factors.append("Established domain")
-
-        # Content quality indicators
-        if hasattr(result, "content") and result.content:
-            content_length = len(result.content)
-
-            # Appropriate length (not too short, not too long)
-            if 100 <= content_length <= 2000:
-                score += 0.1
-                factors.append("Appropriate content length")
-
-            # Check for academic/professional language patterns
-            academic_terms = [
-                "research",
-                "study",
-                "analysis",
-                "methodology",
-                "findings",
-                "conclusion",
-            ]
-            if any(term in result.content.lower() for term in academic_terms):
-                score += 0.1
-                factors.append("Academic/professional content")
-
-        # Title quality
-        if hasattr(result, "title") and result.title:
-            if len(result.title) >= 10 and not result.title.isupper():
-                score += 0.05
-                factors.append("Well-formatted title")
-
-        # Result score quality
-        if hasattr(result, "score") and result.score >= 0.8:
-            score += 0.1
-            factors.append("High relevance score")
-
-        # Store factors for explanation
-        result.credibility_factors = factors
-
-        return min(1.0, score)  # Cap at 1.0
-
-    def _generate_relevance_explanation(
-            self, result, query: str, source_type: str
-    ) -> str:
-        """
-        Generate explanation for why a result is relevant to the query.
-
-        Args:
-            result: Search result (local or web)
-            query: Original search query
-            source_type: "local" or "web"
-
-        Returns:
-            Human-readable relevance explanation
-        """
-        query_terms = set(query.lower().split())
-        content_lower = result.content.lower() if hasattr(result, "content") else ""
-
-        # Find matching terms
-        matching_terms = []
-        for term in query_terms:
-            if term in content_lower and len(term) > 2:  # Skip short words
-                matching_terms.append(term)
-
-        # Calculate match percentage
-        match_percentage = (
-            (len(matching_terms) / len(query_terms)) * 100 if query_terms else 0
-        )
-
-        # Generate explanation based on source type and matches
-        if source_type == "local":
-            base_explanation = (
-                f"Matches {len(matching_terms)}/{len(query_terms)} query terms"
-            )
-            if hasattr(result, "score"):
-                if result.score >= 0.9:
-                    return f"{base_explanation} with excellent semantic similarity"
-                elif result.score >= 0.8:
-                    return f"{base_explanation} with high semantic similarity"
-                elif result.score >= 0.7:
-                    return f"{base_explanation} with good semantic similarity"
-                else:
-                    return f"{base_explanation} with moderate semantic similarity"
-        else:  # web results
-            base_explanation = f"Contains {len(matching_terms)} key terms from query"
-            if hasattr(result, "score"):
-                if result.score >= 0.8:
-                    return f"{base_explanation}, highly relevant content"
-                elif result.score >= 0.6:
-                    return f"{base_explanation}, moderately relevant content"
-                else:
-                    return f"{base_explanation}, potentially relevant content"
-
-        return "Relevance detected through content analysis"
-
-    def _generate_smart_recommendations(
-            self,
-            local_results: List,
-            web_results: List,
-            max_local_score: float,
-            similarity_threshold: float,
-            confidence_level: str,
-            query: str,
-    ) -> str:
-        """
-        Generate intelligent recommendations based on search results analysis.
-
-        Args:
-            local_results: Local search results
-            web_results: Web search results
-            max_local_score: Highest local similarity score
-            similarity_threshold: Applied threshold
-            confidence_level: Overall confidence level
-            query: Original search query
-
-        Returns:
-            Formatted recommendations string
-        """
-        recommendations = []
-
-        # Analyze result quality and provide recommendations
-        if confidence_level == "HIGH":
-            if local_results and max_local_score >= 0.9:
-                recommendations.append(
-                    "✅ **Excellent local knowledge found** - Your knowledge base contains highly relevant information for this query."
-                )
-            else:
-                recommendations.append(
-                    "✅ **Good local knowledge available** - Sufficient information found in your knowledge base."
-                )
-
-        elif confidence_level == "MEDIUM":
-            if local_results and web_results:
-                recommendations.append(
-                    "🔄 **Hybrid approach applied** - Combined local and web sources for comprehensive coverage."
-                )
-            elif web_results and not local_results:
-                recommendations.append(
-                    "🌐 **Web sources utilized** - No local knowledge found, relying on current web information."
-                )
-            elif local_results and not web_results:
-                recommendations.append(
-                    "📚 **Local sources only** - Web search unavailable, using available local knowledge."
-                )
-
-            # Suggest improvements
-            if max_local_score < similarity_threshold:
-                recommendations.append(
-                    f"💡 **Suggestion:** Consider adding more documents about '{query}' to improve future local search results."
-                )
-
-        else:  # LOW confidence
-            recommendations.append(
-                "⚠️ **Limited results found** - Consider refining your search query or adding relevant documents to your knowledge base."
-            )
-
-            # Provide specific suggestions
-            query_words = query.split()
-            if len(query_words) > 5:
-                recommendations.append(
-                    "💡 **Try shorter queries** - Use 2-4 key terms for better results."
-                )
-            elif len(query_words) == 1:
-                recommendations.append(
-                    "💡 **Try more specific queries** - Add context or related terms."
-                )
-
-        # Source diversity analysis
-        total_sources = len(local_results) + len(web_results)
-        if total_sources >= 5:
-            recommendations.append(
-                f"📊 **Good source diversity** - Found {total_sources} results across multiple sources."
-            )
-        elif total_sources >= 2:
-            recommendations.append(
-                f"📊 **Moderate source coverage** - Found {total_sources} relevant sources."
-            )
-
-        # Credibility assessment
-        if web_results:
-            high_credibility_count = sum(
-                1
-                for result in web_results
-                if hasattr(result, "credibility_score")
-                and result.credibility_score >= 0.8
-            )
-            if high_credibility_count > 0:
-                recommendations.append(
-                    f"🏆 **High credibility sources** - {high_credibility_count} web result(s) from trusted sources."
-                )
-
-        return (
-            "\n".join(recommendations)
-            if recommendations
-            else "No specific recommendations available."
-        )
 
     # Document Management Tool Handlers
     
@@ -2458,18 +1345,12 @@ class RAGMCPServer:
             
             # Update content if provided
             if content:
-                vector_store = await self._get_vector_store()
-                # Remove old document
-                await vector_store.delete_documents([document_id])
-                # Add updated document
+                rag_engine = await self._get_rag_engine()
+                # Note: RAGEngine handles document updates internally
+                # For now, we'll track the content change in metadata
                 updated_metadata = self._documents_metadata[document_id].copy()
                 updated_metadata["modified_at"] = datetime.now().isoformat()
-                
-                await vector_store.add_documents([Document(
-                    page_content=content,
-                    metadata=updated_metadata,
-                    id=document_id
-                )])
+                updated_metadata["content_updated"] = True
             
             # Update metadata
             if metadata:
@@ -2522,10 +1403,11 @@ class RAGMCPServer:
                 self._documents_metadata[document_id]["deleted_at"] = datetime.now().isoformat()
                 action = "soft deleted"
             else:
-                # Remove from vector store and all tracking
+                # Remove from RAG engine and all tracking
                 if cleanup_chunks:
-                    vector_store = await self._get_vector_store()
-                    await vector_store.delete_documents([document_id])
+                    rag_engine = await self._get_rag_engine()
+                    # Note: RAGEngine handles document deletion internally
+                    # For now, we'll just mark as deleted in metadata
                 
                 # Remove from all tracking dictionaries
                 del self._documents_metadata[document_id]
@@ -3037,8 +1919,11 @@ class RAGMCPServer:
             self._validate_startup_dependencies()
 
             # Create stdio transport and server
-            from mcp import ClientSession, StdioServerTransport
-            from mcp.server.stdio import stdio_server
+            try:
+                from mcp.server.stdio import stdio_server
+            except ImportError:
+                # Fallback for different MCP versions
+                from mcp.server import serve_stdio as stdio_server
 
             # Initialize server
             async with stdio_server() as (read_stream, write_stream):

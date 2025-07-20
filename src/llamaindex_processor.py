@@ -10,7 +10,6 @@ from llama_index.core import (
     Settings,
     StorageContext,
     get_response_synthesizer,
-    Response,
 )
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.retrievers import (
@@ -27,7 +26,8 @@ except ImportError:
     except ImportError:
         # Fallback: use base retriever
         BM25Retriever = BaseRetriever
-# FusionRetriever import - using correct path
+
+# FusionRetriever import
 try:
     from llama_index.core.retrievers import QueryFusionRetriever as FusionRetriever
 except ImportError:
@@ -37,452 +37,29 @@ except ImportError:
         # Fallback: create a simple fusion retriever class
         from llama_index.core.retrievers import BaseRetriever
         FusionRetriever = BaseRetriever
+
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.postprocessor import SimilarityPostprocessor
 from llama_index.core.response_synthesizers import ResponseMode
-from llama_index.core.vector_stores.types import (
-    MetadataFilters,
-    ExactMatchFilter,
-    MetadataFilter,
-)
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.llms.openai import OpenAI
 from llama_index.vector_stores.chroma import ChromaVectorStore
-from llama_index.core.schema import NodeWithScore
 import chromadb
 from chromadb.config import Settings as ChromaSettings
 
 from config.settings import config
 
 
-class LlamaIndexProcessor:
-    """
-    Enhanced document processor using LlamaIndex for better RAG performance.
-    """
-
-    def __init__(
-        self,
-        collection_name: str = "documents",
-        chunk_size: int = 1024,
-        chunk_overlap: int = 200,
-        embedding_model: str = "text-embedding-3-small",
-        similarity_top_k: int = 10,
-        similarity_cutoff: float = 0.7,
-    ):
-        """
-        Initialize the LlamaIndex processor.
-
-        Args:
-            collection_name: Name of the ChromaDB collection
-            chunk_size: Size of text chunks
-            chunk_overlap: Overlap between chunks
-            embedding_model: OpenAI embedding model name
-            similarity_top_k: Number of similar documents to retrieve
-            similarity_cutoff: Minimum similarity score threshold
-        """
-        self.collection_name = collection_name
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
-        self.similarity_top_k = similarity_top_k
-        self.similarity_cutoff = similarity_cutoff
-
-        self.logger = logging.getLogger(f"{__name__}.LlamaIndexProcessor")
-
-        # Initialize LlamaIndex settings
-        self._setup_settings(embedding_model)
-
-        # Initialize ChromaDB
-        self._setup_chroma()
-
-        # Initialize index
-        self.index: Optional[VectorStoreIndex] = None
-        self.query_engine: Optional[RetrieverQueryEngine] = None
-
-        # Node parser for chunking
-        self.node_parser = SentenceSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            separator=" ",
-        )
-
-    def _setup_settings(self, embedding_model: str):
-        """Setup LlamaIndex global settings."""
-        # Check if OpenAI API key is available
-        if not config.OPENAI_API_KEY:
-            raise ValueError("OpenAI API key is required for LlamaIndex integration")
-
-        # Set up embedding model
-        Settings.embed_model = OpenAIEmbedding(
-            model=embedding_model,
-            api_key=config.OPENAI_API_KEY,
-            embed_batch_size=100,  # Batch embeddings for efficiency
-        )
-
-        # Set up LLM for query processing
-        Settings.llm = OpenAI(
-            model="gpt-3.5-turbo",
-            api_key=config.OPENAI_API_KEY,
-            temperature=0.1,
-        )
-
-        # Set chunk size for node parser
-        Settings.chunk_size = self.chunk_size
-        Settings.chunk_overlap = self.chunk_overlap
-
-    def _setup_chroma(self):
-        """Setup ChromaDB client and collection."""
-        try:
-            # Initialize ChromaDB with persistent storage
-            chroma_settings = ChromaSettings(
-                persist_directory=str(config.VECTOR_STORE_PATH),
-                anonymized_telemetry=False,
-            )
-
-            self.chroma_client = chromadb.PersistentClient(
-                path=str(config.VECTOR_STORE_PATH),
-                settings=chroma_settings,
-            )
-
-            # Get or create collection
-            self.collection = self.chroma_client.get_or_create_collection(
-                name=self.collection_name,
-                metadata={"hnsw:space": "cosine"},
-            )
-
-            # Create ChromaVectorStore
-            self.vector_store = ChromaVectorStore(chroma_collection=self.collection)
-
-            self.logger.info(
-                f"ChromaDB initialized with collection: {self.collection_name}"
-            )
-
-        except Exception as e:
-            self.logger.error(f"Failed to initialize ChromaDB: {e}")
-            raise
-
-    def _create_index(self) -> VectorStoreIndex:
-        """Create or load the vector index."""
-        try:
-            # Create storage context with vector store
-            storage_context = StorageContext.from_defaults(
-                vector_store=self.vector_store
-            )
-
-            # Try to load existing index
-            try:
-                index = VectorStoreIndex.from_vector_store(
-                    vector_store=self.vector_store,
-                    storage_context=storage_context,
-                )
-                self.logger.info("Loaded existing vector index")
-                return index
-            except Exception:
-                # Create new index if none exists
-                index = VectorStoreIndex(
-                    [],
-                    storage_context=storage_context,
-                )
-                self.logger.info("Created new vector index")
-                return index
-
-        except Exception as e:
-            self.logger.error(f"Failed to create/load index: {e}")
-            raise
-
-    def _create_query_engine(self) -> RetrieverQueryEngine:
-        """Create query engine with optimized retrieval."""
-        try:
-            # Create retriever
-            retriever = VectorIndexRetriever(
-                index=self.index,
-                similarity_top_k=self.similarity_top_k,
-            )
-
-            # Create postprocessor for similarity filtering
-            postprocessor = SimilarityPostprocessor(
-                similarity_cutoff=self.similarity_cutoff
-            )
-
-            # Create response synthesizer
-            response_synthesizer = get_response_synthesizer(
-                response_mode=ResponseMode.COMPACT,
-                streaming=False,
-            )
-
-            # Create query engine
-            query_engine = RetrieverQueryEngine(
-                retriever=retriever,
-                response_synthesizer=response_synthesizer,
-                node_postprocessors=[postprocessor],
-            )
-
-            self.logger.info("Created optimized query engine")
-            return query_engine
-
-        except Exception as e:
-            self.logger.error(f"Failed to create query engine: {e}")
-            raise
-
-    async def load_documents(
-        self,
-        input_path: Union[str, Path],
-        file_extractor: Optional[Dict[str, Any]] = None,
-        recursive: bool = True,
-    ) -> List[Document]:
-        """
-        Load documents from file or directory using LlamaIndex readers.
-
-        Args:
-            input_path: Path to file or directory
-            file_extractor: Custom file extractors for specific formats
-            recursive: Whether to recursively load from subdirectories
-
-        Returns:
-            List of LlamaIndex Document objects
-        """
-        try:
-            input_path = Path(input_path)
-
-            if not input_path.exists():
-                raise FileNotFoundError(f"Path does not exist: {input_path}")
-
-            # Use SimpleDirectoryReader for comprehensive file loading
-            if input_path.is_file():
-                # Load single file
-                reader = SimpleDirectoryReader(
-                    input_files=[str(input_path)],
-                    file_extractor=file_extractor,
-                )
-            else:
-                # Load directory
-                reader = SimpleDirectoryReader(
-                    input_dir=str(input_path),
-                    recursive=recursive,
-                    file_extractor=file_extractor,
-                    exclude_hidden=True,
-                )
-
-            # Load documents
-            documents = reader.load_data()
-
-            # Add custom metadata
-            for doc in documents:
-                doc.metadata.update(
-                    {
-                        "processor": "llamaindex",
-                        "source": str(input_path),
-                    }
-                )
-
-            self.logger.info(f"Loaded {len(documents)} documents from {input_path}")
-            return documents
-
-        except Exception as e:
-            self.logger.error(f"Failed to load documents from {input_path}: {e}")
-            raise
-
-    async def process_documents(
-        self,
-        documents: List[Document],
-        show_progress: bool = True,
-    ) -> VectorStoreIndex:
-        """
-        Process documents and create/update vector index.
-
-        Args:
-            documents: List of documents to process
-            show_progress: Whether to show processing progress
-
-        Returns:
-            Updated vector index
-        """
-        try:
-            if not documents:
-                self.logger.warning("No documents to process")
-                return self.index or self._create_index()
-
-            # Create index if it doesn't exist
-            if self.index is None:
-                self.index = self._create_index()
-
-            # Parse documents into nodes with custom chunking
-            nodes = self.node_parser.get_nodes_from_documents(
-                documents, show_progress=show_progress
-            )
-
-            # Add nodes to index
-            self.index.insert_nodes(nodes)
-
-            # Create/update query engine
-            self.query_engine = self._create_query_engine()
-
-            self.logger.info(
-                f"Processed {len(documents)} documents into {len(nodes)} nodes"
-            )
-            return self.index
-
-        except Exception as e:
-            self.logger.error(f"Failed to process documents: {e}")
-            raise
-
-    async def search(
-        self,
-        query: str,
-        top_k: Optional[int] = None,
-        similarity_cutoff: Optional[float] = None,
-    ) -> List[NodeWithScore]:
-        """
-        Search the knowledge base using optimized retrieval.
-
-        Args:
-            query: Search query
-            top_k: Number of results to return
-            similarity_cutoff: Minimum similarity score
-
-        Returns:
-            List of nodes with similarity scores
-        """
-        try:
-            if self.index is None:
-                raise RuntimeError("Index not initialized. Process documents first.")
-
-            # Use custom parameters if provided
-            retriever = VectorIndexRetriever(
-                index=self.index,
-                similarity_top_k=top_k or self.similarity_top_k,
-            )
-
-            # Retrieve nodes
-            nodes = retriever.retrieve(query)
-
-            # Apply similarity cutoff if specified
-            if similarity_cutoff is not None:
-                nodes = [node for node in nodes if node.score >= similarity_cutoff]
-            elif self.similarity_cutoff > 0:
-                nodes = [node for node in nodes if node.score >= self.similarity_cutoff]
-
-            self.logger.debug(f"Retrieved {len(nodes)} nodes for query: {query}")
-            return nodes
-
-        except Exception as e:
-            self.logger.error(f"Search failed: {e}")
-            raise
-
-    async def query(
-        self,
-        query: str,
-        response_mode: str = "compact",
-    ) -> str:
-        """
-        Query the knowledge base with response synthesis.
-
-        Args:
-            query: Query string
-            response_mode: Response synthesis mode
-
-        Returns:
-            Synthesized response
-        """
-        try:
-            if self.query_engine is None:
-                raise RuntimeError(
-                    "Query engine not initialized. Process documents first."
-                )
-
-            # Execute query
-            response = self.query_engine.query(query)
-
-            self.logger.debug(f"Generated response for query: {query}")
-            return str(response)
-
-        except Exception as e:
-            self.logger.error(f"Query failed: {e}")
-            raise
-
-    async def get_collection_stats(self) -> Dict[str, Any]:
-        """Get statistics about the document collection."""
-        try:
-            stats = {
-                "collection_name": self.collection_name,
-                "document_count": self.collection.count(),
-                "chunk_size": self.chunk_size,
-                "chunk_overlap": self.chunk_overlap,
-                "similarity_top_k": self.similarity_top_k,
-                "similarity_cutoff": self.similarity_cutoff,
-                "index_initialized": self.index is not None,
-                "query_engine_initialized": self.query_engine is not None,
-            }
-
-            return stats
-
-        except Exception as e:
-            self.logger.error(f"Failed to get collection stats: {e}")
-            return {"error": str(e)}
-
-    async def delete_collection(self) -> bool:
-        """Delete the entire collection."""
-        try:
-            self.chroma_client.delete_collection(name=self.collection_name)
-            self.index = None
-            self.query_engine = None
-
-            # Recreate collection
-            self._setup_chroma()
-
-            self.logger.info(
-                f"Deleted and recreated collection: {self.collection_name}"
-            )
-            return True
-
-        except Exception as e:
-            self.logger.error(f"Failed to delete collection: {e}")
-            return False
-
-    async def add_documents_from_path(
-        self,
-        path: Union[str, Path],
-        recursive: bool = True,
-        file_extractor: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[int, List[str]]:
-        """
-        Convenience method to load and process documents from a path.
-
-        Args:
-            path: Path to file or directory
-            recursive: Whether to recursively process subdirectories
-            file_extractor: Custom file extractors
-
-        Returns:
-            Tuple of (document_count, error_messages)
-        """
-        try:
-            # Load documents
-            documents = await self.load_documents(
-                path, file_extractor=file_extractor, recursive=recursive
-            )
-
-            if not documents:
-                return 0, ["No documents found"]
-
-            # Process documents
-            await self.process_documents(documents)
-
-            return len(documents), []
-
-        except Exception as e:
-            error_msg = f"Failed to add documents from {path}: {e}"
-            self.logger.error(error_msg)
-            return 0, [error_msg]
-
-
 class RAGEngine:
     """
-    Powerful RAG Engine that replaces LlamaIndexProcessor with advanced features.
+    Advanced RAG Engine with hybrid search capabilities.
     
-    This class provides:
-    - Hybrid search combining vector similarity and BM25
-    - Personalization with metadata filtering
-    - Advanced query processing with fusion retrieval
+    Features:
+    - Vector similarity search using ChromaDB
+    - BM25 text-based search
+    - Query fusion for enhanced retrieval
+    - Metadata filtering and personalization
+    - Efficient query engine caching
     """
     
     def __init__(
@@ -536,6 +113,9 @@ class RAGEngine:
             separator=" ",
         )
         
+        # Cache for query engines to avoid rebuilding
+        self._query_engine_cache = {}
+        
         self.logger.info(f"RAGEngine initialized with {len(self.documents)} documents")
     
     def _setup_settings(self, embedding_model: str, llm_model: str):
@@ -584,60 +164,46 @@ class RAGEngine:
                 metadata={"hnsw:space": "cosine"},
             )
             
-            # Create ChromaVectorStore
+            # Create ChromaVectorStore for LlamaIndex
             self.vector_store = ChromaVectorStore(chroma_collection=self.collection)
             
-            self.logger.info(
-                f"ChromaDB initialized with collection: {self.collection_name}"
-            )
+            self.logger.info(f"Connected to ChromaDB collection: {self.collection_name}")
             
         except Exception as e:
-            self.logger.error(f"Failed to initialize ChromaDB: {e}")
-            raise
+            error_msg = f"Failed to setup ChromaDB: {e}"
+            self.logger.error(error_msg)
+            raise RuntimeError(error_msg)
     
     def _load_or_create_index(self) -> VectorStoreIndex:
         """Load existing index or create new one."""
         try:
-            # Try to load existing index
-            try:
-                index = VectorStoreIndex.from_vector_store(
-                    vector_store=self.vector_store,
-                    storage_context=self.storage_context,
-                )
-                self.logger.info("Loaded existing vector index")
-                return index
-            except Exception:
-                # Create new index if none exists
-                index = VectorStoreIndex(
-                    [],
-                    storage_context=self.storage_context,
-                )
-                self.logger.info("Created new vector index")
-                return index
-                
-        except Exception as e:
-            self.logger.error(f"Failed to create/load index: {e}")
-            raise
+            # Try to load existing index from vector store
+            index = VectorStoreIndex.from_vector_store(
+                vector_store=self.vector_store,
+                storage_context=self.storage_context
+            )
+            doc_count = self.collection.count()
+            self.logger.info(f"Loaded existing index with {doc_count} documents")
+            return index
+            
+        except Exception:
+            # Create new empty index
+            index = VectorStoreIndex([], storage_context=self.storage_context)
+            self.logger.info("Created new empty index")
+            return index
     
     def _load_all_documents(self) -> List[Document]:
-        """Load all documents from the vector store for BM25 retriever."""
+        """Load all documents from the index for BM25 retrieval."""
         try:
-            # Get all document IDs from the collection
-            all_data = self.collection.get()
-            
-            if not all_data['documents']:
-                self.logger.info("No documents found in collection")
-                return []
-            
-            # Convert to LlamaIndex Document format
+            # Get all documents from the vector store
+            all_nodes = self.index.docstore.docs
             documents = []
-            for i, (doc_id, text, metadata) in enumerate(
-                zip(all_data['ids'], all_data['documents'], all_data['metadatas'])
-            ):
+            
+            for node_id, node in all_nodes.items():
                 doc = Document(
-                    text=text,
-                    doc_id=doc_id,
-                    metadata=metadata or {}
+                    text=node.text,
+                    metadata=node.metadata or {},
+                    doc_id=node_id
                 )
                 documents.append(doc)
             
@@ -648,163 +214,233 @@ class RAGEngine:
             self.logger.warning(f"Failed to load documents for BM25: {e}")
             return []
     
-    def _get_vector_retriever(
-        self, 
-        metadata_filters: Optional[MetadataFilters] = None
-    ) -> VectorIndexRetriever:
-        """Get vector retriever, optionally with metadata filters."""
-        return VectorIndexRetriever(
-            index=self.index,
-            similarity_top_k=self.similarity_top_k,
-            filters=metadata_filters,
-        )
-    
-    def _get_bm25_retriever(self) -> BM25Retriever:
-        """Get BM25 retriever using all documents."""
-        if not self.documents:
-            # Create a dummy document if no documents are available
-            dummy_doc = Document(
-                text="No documents available for BM25 retrieval.",
-                metadata={"type": "dummy"}
+    def _get_query_engine(self, search_type: str = "vector", **kwargs) -> RetrieverQueryEngine:
+        """Get cached query engine or create new one."""
+        cache_key = f"{search_type}_{hash(frozenset(kwargs.items()))}"
+        
+        if cache_key in self._query_engine_cache:
+            return self._query_engine_cache[cache_key]
+        
+        if search_type == "vector":
+            retriever = VectorIndexRetriever(
+                index=self.index,
+                similarity_top_k=kwargs.get("top_k", self.similarity_top_k),
             )
-            return BM25Retriever.from_defaults(
-                docstore=None,
-                similarity_top_k=self.similarity_top_k,
+        elif search_type == "bm25" and self.documents:
+            try:
+                retriever = BM25Retriever.from_defaults(
+                    docstore=self.index.docstore,
+                    similarity_top_k=kwargs.get("top_k", self.similarity_top_k),
+                )
+            except Exception:
+                # Fallback to vector retriever
+                retriever = VectorIndexRetriever(
+                    index=self.index,
+                    similarity_top_k=kwargs.get("top_k", self.similarity_top_k),
+                )
+        elif search_type == "hybrid" and self.documents:
+            try:
+                vector_retriever = VectorIndexRetriever(
+                    index=self.index,
+                    similarity_top_k=kwargs.get("top_k", self.similarity_top_k),
+                )
+                bm25_retriever = BM25Retriever.from_defaults(
+                    docstore=self.index.docstore,
+                    similarity_top_k=kwargs.get("top_k", self.similarity_top_k),
+                )
+                retriever = FusionRetriever(
+                    retrievers=[vector_retriever, bm25_retriever],
+                    similarity_top_k=kwargs.get("top_k", self.similarity_top_k),
+                )
+            except Exception:
+                # Fallback to vector retriever
+                retriever = VectorIndexRetriever(
+                    index=self.index,
+                    similarity_top_k=kwargs.get("top_k", self.similarity_top_k),
+                )
+        else:
+            # Default to vector retriever
+            retriever = VectorIndexRetriever(
+                index=self.index,
+                similarity_top_k=kwargs.get("top_k", self.similarity_top_k),
             )
         
-        return BM25Retriever.from_defaults(
-            documents=self.documents,
-            similarity_top_k=self.similarity_top_k,
+        # Create query engine
+        query_engine = RetrieverQueryEngine(
+            retriever=retriever,
+            response_synthesizer=get_response_synthesizer(
+                response_mode=kwargs.get("response_mode", ResponseMode.COMPACT)
+            ),
+            node_postprocessors=[
+                SimilarityPostprocessor(
+                    similarity_cutoff=kwargs.get("similarity_cutoff", 0.7)
+                )
+            ],
         )
+        
+        # Cache the query engine
+        self._query_engine_cache[cache_key] = query_engine
+        return query_engine
     
-    def _get_fusion_retriever(
-        self, 
-        vector_retriever: BaseRetriever,
-        bm25_retriever: BaseRetriever
-    ) -> FusionRetriever:
-        """Get fusion retriever combining vector and BM25 retrievers."""
-        return FusionRetriever(
-            retrievers=[vector_retriever, bm25_retriever],
-            mode="reciprocal_rerank",
-            similarity_top_k=self.similarity_top_k,
-        )
-    
-    async def query(
-        self, 
-        query_text: str, 
-        user_preferences: Optional[Dict[str, Any]] = None
-    ) -> Response:
+    async def search(
+        self,
+        query: str,
+        search_type: str = "hybrid",
+        top_k: Optional[int] = None,
+        filters: Optional[Dict[str, Any]] = None,
+        **kwargs
+    ) -> List[Dict[str, Any]]:
         """
-        Execute a query using hybrid retrieval with optional personalization.
+        Search for relevant documents using specified search type.
         
         Args:
-            query_text: The user's query
-            user_preferences: Optional user preferences for filtering
-                             (e.g., {"tags": ["python"], "category": "tutorial"})
-        
+            query: Search query
+            search_type: "vector", "bm25", or "hybrid"
+            top_k: Number of results to return
+            filters: Metadata filters (basic support)
+            **kwargs: Additional parameters for query engine
+            
         Returns:
-            Complete LlamaIndex Response object with answer, source nodes, and metadata
+            List of search results with content, metadata, and scores
         """
         try:
-            self.logger.info(f"Processing query: {query_text}")
-            
-            # Create metadata filters if user preferences are provided
-            metadata_filters = None
-            if user_preferences:
-                filters = []
-                for key, values in user_preferences.items():
-                    if isinstance(values, list):
-                        # Multiple values for the same key
-                        for value in values:
-                            filters.append(
-                                ExactMatchFilter(key=key, value=value)
-                            )
-                    else:
-                        # Single value
-                        filters.append(
-                            ExactMatchFilter(key=key, value=values)
-                        )
-                
-                if filters:
-                    metadata_filters = MetadataFilters(filters=filters)
-                    self.logger.info(f"Applied metadata filters: {user_preferences}")
-            
-            # Get retrievers
-            vector_retriever = self._get_vector_retriever(metadata_filters)
-            bm25_retriever = self._get_bm25_retriever()
-            
-            # Create fusion retriever
-            fusion_retriever = self._get_fusion_retriever(
-                vector_retriever, bm25_retriever
-            )
-            
-            # Create query engine
-            query_engine = RetrieverQueryEngine(
-                retriever=fusion_retriever,
-                response_synthesizer=get_response_synthesizer(
-                    response_mode=ResponseMode.COMPACT,
-                    streaming=False,
-                ),
-            )
+            top_k = top_k or self.similarity_top_k
+            query_engine = self._get_query_engine(search_type, top_k=top_k, **kwargs)
             
             # Execute query
-            response = query_engine.query(query_text)
+            response = await asyncio.to_thread(query_engine.query, query)
             
-            self.logger.info(
-                f"Generated response with {len(response.source_nodes)} source nodes"
-            )
+            # Extract results
+            results = []
+            if hasattr(response, "source_nodes"):
+                for node in response.source_nodes:
+                    # Apply basic metadata filtering if specified
+                    if filters and not self._matches_filters(node.node.metadata or {}, filters):
+                        continue
+                    
+                    result = {
+                        "content": node.node.text,
+                        "metadata": node.node.metadata or {},
+                        "score": getattr(node, "score", 0.0),
+                        "node_id": node.node.node_id,
+                    }
+                    results.append(result)
             
-            return response
+            self.logger.info(f"Search ({search_type}) completed: {len(results)} results")
+            return results
             
         except Exception as e:
-            self.logger.error(f"Query execution failed: {e}")
-            # Return an error response
-            from llama_index.core.schema import NodeWithScore, TextNode
-            error_node = NodeWithScore(
-                node=TextNode(text=f"Error processing query: {str(e)}"),
-                score=0.0
-            )
-            return Response(
-                response=f"Error processing query: {str(e)}",
-                source_nodes=[error_node],
-                metadata={"error": True}
-            )
+            error_msg = f"Search failed: {e}"
+            self.logger.error(error_msg)
+            return []
     
-    async def add_documents(
+    def _matches_filters(self, metadata: Dict[str, Any], filters: Dict[str, Any]) -> bool:
+        """Basic metadata filtering."""
+        for key, value in filters.items():
+            if key not in metadata or metadata[key] != value:
+                return False
+        return True
+    
+    async def query_with_response(
         self,
-        documents: List[Document],
-        show_progress: bool = True,
-    ) -> bool:
+        query: str,
+        search_type: str = "hybrid",
+        **kwargs
+    ) -> str:
         """
-        Add new documents to the index.
+        Query the knowledge base and get a synthesized response.
         
         Args:
-            documents: List of documents to add
-            show_progress: Whether to show processing progress
-        
+            query: Question to ask
+            search_type: Type of search to use
+            **kwargs: Additional parameters
+            
         Returns:
-            True if successful, False otherwise
+            Synthesized response text
         """
         try:
-            if not documents:
-                self.logger.warning("No documents to add")
-                return False
+            query_engine = self._get_query_engine(search_type, **kwargs)
+            response = await asyncio.to_thread(query_engine.query, query)
+            return str(response)
             
-            # Parse documents into nodes
-            nodes = self.node_parser.get_nodes_from_documents(
-                documents, show_progress=show_progress
-            )
+        except Exception as e:
+            error_msg = f"Query failed: {e}"
+            self.logger.error(error_msg)
+            return f"Error: {error_msg}"
+    
+    async def add_documents_from_path(
+        self, path: Union[str, Path]
+    ) -> Tuple[int, List[str]]:
+        """
+        Add documents from a file or directory path.
+        
+        Args:
+            path: Path to file or directory
+            
+        Returns:
+            Tuple of (number of documents added, list of error messages)
+        """
+        try:
+            path = Path(path)
+            if not path.exists():
+                return 0, [f"Path does not exist: {path}"]
+            
+            # Load documents using SimpleDirectoryReader
+            if path.is_file():
+                loader = SimpleDirectoryReader(
+                    input_files=[str(path)],
+                    filename_as_id=True
+                )
+            else:
+                loader = SimpleDirectoryReader(
+                    input_dir=str(path),
+                    filename_as_id=True,
+                    recursive=True
+                )
+            
+            documents = loader.load_data()
+            
+            if not documents:
+                return 0, ["No documents found"]
+            
+            # Parse nodes and add to index
+            nodes = self.node_parser.get_nodes_from_documents(documents)
             
             # Add nodes to index
-            self.index.insert_nodes(nodes)
+            for node in nodes:
+                self.index.insert(node)
             
-            # Update documents list for BM25
-            self.documents.extend(documents)
+            # Refresh documents for BM25
+            self.documents = self._load_all_documents()
             
-            self.logger.info(
-                f"Added {len(documents)} documents ({len(nodes)} nodes) to index"
-            )
+            # Clear query engine cache since index changed
+            self._query_engine_cache.clear()
             
+            self.logger.info(f"Added {len(documents)} documents from {path}")
+            return len(documents), []
+            
+        except Exception as e:
+            error_msg = f"Failed to add documents from {path}: {e}"
+            self.logger.error(error_msg)
+            return 0, [error_msg]
+    
+    async def add_documents(self, documents: List[Document]) -> bool:
+        """Add a list of documents to the index."""
+        try:
+            # Parse nodes and add to index
+            nodes = self.node_parser.get_nodes_from_documents(documents)
+            
+            # Add nodes to index
+            for node in nodes:
+                self.index.insert(node)
+            
+            # Refresh documents for BM25
+            self.documents = self._load_all_documents()
+            
+            # Clear query engine cache since index changed
+            self._query_engine_cache.clear()
+            
+            self.logger.info(f"Added {len(documents)} documents")
             return True
             
         except Exception as e:
@@ -823,36 +459,11 @@ class RAGEngine:
                 "similarity_top_k": self.similarity_top_k,
                 "index_initialized": self.index is not None,
                 "documents_loaded": len(self.documents) > 0,
+                "cached_query_engines": len(self._query_engine_cache),
             }
         except Exception as e:
             self.logger.error(f"Failed to get stats: {e}")
             return {"error": str(e)}
 
 
-# Convenience functions for backward compatibility
-async def create_llamaindex_processor(
-    collection_name: str = "documents", **kwargs
-) -> LlamaIndexProcessor:
-    """Create and initialize a LlamaIndex processor."""
-    processor = LlamaIndexProcessor(collection_name=collection_name, **kwargs)
-    return processor
-
-
-async def process_documents_with_llamaindex(
-    input_path: Union[str, Path], collection_name: str = "documents", **kwargs
-) -> LlamaIndexProcessor:
-    """Process documents using LlamaIndex and return the processor."""
-    processor = await create_llamaindex_processor(
-        collection_name=collection_name, **kwargs
-    )
-
-    await processor.add_documents_from_path(input_path)
-    return processor
-
-
-__all__ = [
-    "LlamaIndexProcessor",
-    "RAGEngine",
-    "create_llamaindex_processor",
-    "process_documents_with_llamaindex",
-]
+__all__ = ["RAGEngine"]
