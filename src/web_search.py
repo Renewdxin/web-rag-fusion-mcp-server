@@ -83,9 +83,10 @@ class PerplexityBackend(SearchBackend):
             self.use_perplexipy = True
         else:
             # Use OpenAI client with Perplexity endpoint
+            base_url = config.SEARCH_BASE_URL or "https://api.perplexity.ai"
             self.client = OpenAI(
                 api_key=api_key,
-                base_url="https://api.perplexity.ai"
+                base_url=base_url
             )
             self.use_perplexipy = False
     
@@ -193,6 +194,8 @@ class ExaBackend(SearchBackend):
             raise ValueError("Exa API key is required")
             
         self.api_key = api_key
+        # Note: Exa client may not support custom base_url, check their documentation
+        # If they add support in the future, we can use config.SEARCH_BASE_URL here
         self.client = Exa(api_key=api_key)
         self.logger = logging.getLogger(f"{__name__}.ExaBackend")
     

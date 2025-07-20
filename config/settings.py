@@ -90,9 +90,10 @@ class Config:
         return os.getenv('VECTOR_STORE_PATH', './data/vector_store.db')
 
     @property
-    def TAVILY_API_KEY(self) -> str:
-        """API key for Tavily service."""
-        value = os.getenv('TAVILY_API_KEY', '')
+    def SEARCH_API_KEY(self) -> str:
+        """API key for search service (Perplexity or Exa)."""
+        # Check for new key first, fallback to old key for compatibility
+        value = os.getenv('SEARCH_API_KEY') or os.getenv('TAVILY_API_KEY', '')
         return value
 
     @property
@@ -105,6 +106,11 @@ class Config:
     def OPENAI_BASE_URL(self) -> Optional[str]:
         """Base URL for OpenAI API (for proxy or alternative endpoints)."""
         return os.getenv('OPENAI_BASE_URL', None)
+
+    @property
+    def SEARCH_BASE_URL(self) -> Optional[str]:
+        """Base URL for search API (for proxy or alternative endpoints)."""
+        return os.getenv('SEARCH_BASE_URL', None)
 
     @property
     def SIMILARITY_THRESHOLD(self) -> float:
@@ -270,7 +276,7 @@ class Config:
 
         # Check required string fields
         required_fields = {
-            'TAVILY_API_KEY': self.TAVILY_API_KEY,
+            'SEARCH_API_KEY': self.SEARCH_API_KEY,
             'OPENAI_API_KEY': self.OPENAI_API_KEY,
         }
 
@@ -338,9 +344,10 @@ class Config:
         """
         return {
             'VECTOR_STORE_PATH': self.VECTOR_STORE_PATH,
-            'TAVILY_API_KEY': '***' if self.TAVILY_API_KEY else '',
+            'SEARCH_API_KEY': '***' if self.SEARCH_API_KEY else '',
             'OPENAI_API_KEY': '***' if self.OPENAI_API_KEY else '',
             'OPENAI_BASE_URL': self.OPENAI_BASE_URL,
+            'SEARCH_BASE_URL': self.SEARCH_BASE_URL,
             'SIMILARITY_THRESHOLD': self.SIMILARITY_THRESHOLD,
             'ENVIRONMENT': self.ENVIRONMENT,
             'LOG_LEVEL': self.LOG_LEVEL,

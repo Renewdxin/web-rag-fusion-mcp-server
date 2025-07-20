@@ -348,11 +348,11 @@ class RAGMCPServer:
         """Get or initialize web search manager with retry logic."""
         if self._web_search is None:
             try:
-                if not config.TAVILY_API_KEY:
-                    raise WebSearchError("Tavily API key not configured")
+                if not config.SEARCH_API_KEY:
+                    raise WebSearchError("Search API key not configured")
 
                 self._web_search = WebSearchManager(
-                    api_key=config.TAVILY_API_KEY,
+                    api_key=config.SEARCH_API_KEY,
                     timeout=getattr(config, "WEB_SEARCH_TIMEOUT", 30),
                     max_retries=getattr(config, "MAX_RETRIES", 3),
                     quota_limit=getattr(config, "TAVILY_QUOTA_LIMIT", None),
@@ -1358,10 +1358,10 @@ class RAGMCPServer:
             self.logger.info("OpenAI API key configured - enhanced features available")
 
         # Check Tavily API key (optional for web search)
-        if not config.TAVILY_API_KEY:
-            self.logger.warning("Tavily API key not configured - web search disabled")
+        if not config.SEARCH_API_KEY:
+            self.logger.warning("Search API key not configured - web search disabled")
         else:
-            self.logger.info("Tavily API key configured - web search available")
+            self.logger.info("Search API key configured - web search available")
 
         self.logger.info("All startup dependencies validated successfully")
 
