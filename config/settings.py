@@ -17,6 +17,13 @@ Config Schema:
     LOG_LEVEL (str): Logging level (DEBUG, INFO, WARNING, ERROR)
     MAX_RETRIES (int): Maximum number of retry attempts
     TIMEOUT_SECONDS (int): Request timeout in seconds
+    USE_LLAMAINDEX (bool): Whether to use LlamaIndex for enhanced RAG processing
+    CHUNK_SIZE (int): Size of text chunks for document processing
+    CHUNK_OVERLAP (int): Overlap between text chunks
+    EMBEDDING_MODEL (str): OpenAI embedding model for LlamaIndex
+    SIMILARITY_TOP_K (int): Number of similar documents to retrieve
+    SIMILARITY_CUTOFF (float): Minimum similarity score for search results
+    COLLECTION_NAME (str): Name of the document collection
 """
 
 import logging
@@ -58,6 +65,14 @@ class Config:
             self._load_environment()
             self._initialized = True
 
+    @property
+    def SEARCH_BACKEND(self) -> Literal['perplexity', 'exa']:
+        """The search backend to use."""
+        backend = os.getenv('SEARCH_BACKEND', 'perplexity').lower()
+        if backend not in ('perplexity', 'exa'):
+            raise ConfigurationError(f"SEARCH_BACKEND must be one of 'perplexity', 'exa', got '{backend}'")
+        return backend # type: ignore
+
     def _load_environment(self) -> None:
         """Load environment variables from .env file if available."""
         if load_dotenv is not None:
@@ -75,9 +90,10 @@ class Config:
         return os.getenv('VECTOR_STORE_PATH', './data/vector_store.db')
 
     @property
-    def TAVILY_API_KEY(self) -> str:
-        """API key for Tavily service."""
-        value = os.getenv('TAVILY_API_KEY', '')
+    def SEARCH_API_KEY(self) -> str:
+        """API key for search service (Perplexity or Exa)."""
+        # Check for new key first, fallback to old key for compatibility
+        value = os.getenv('SEARCH_API_KEY') or os.getenv('TAVILY_API_KEY', '')
         return value
 
     @property
@@ -87,10 +103,20 @@ class Config:
         return value
 
     @property
+    def OPENAI_BASE_URL(self) -> Optional[str]:
+        """Base URL for OpenAI API (for proxy or alternative endpoints)."""
+        return os.getenv('OPENAI_BASE_URL', None)
+
+    @property
+    def SEARCH_BASE_URL(self) -> Optional[str]:
+        """Base URL for search API (for proxy or alternative endpoints)."""
+        return os.getenv('SEARCH_BASE_URL', None)
+
+    @property
     def SIMILARITY_THRESHOLD(self) -> float:
         """Threshold for similarity matching (0.0-1.0)."""
         try:
-            value = float(os.getenv('SIMILARITY_THRESHOLD', '0.8'))
+            value = float(os.getenv('SIMILARITY_THRESHOLD', '0.75'))
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"SIMILARITY_THRESHOLD must be between 0.0 and 1.0, got {value}")
             return value
@@ -136,6 +162,114 @@ class Config:
         except ValueError as e:
             raise ConfigurationError(f"Invalid TIMEOUT_SECONDS: {e}")
 
+    # LlamaIndex Configuration
+    @property
+    def USE_LLAMAINDEX(self) -> bool:
+        """Whether to use LlamaIndex for enhanced RAG processing."""
+        return os.getenv('USE_LLAMAINDEX', 'true').lower() in ('true', '1', 'yes', 'on')
+
+    @property
+    def CHUNK_SIZE(self) -> int:
+        """Size of text chunks for document processing."""
+        try:
+            value = int(os.getenv('CHUNK_SIZE', '1024'))
+            if value <= 0:
+                raise ValueError("CHUNK_SIZE must be positive")
+            return value
+        except ValueError as e:
+            raise ConfigurationError(f"Invalid CHUNK_SIZE: {e}")
+
+    @property
+    def CHUNK_OVERLAP(self) -> int:
+        """Overlap between text chunks."""
+        try:
+            value = int(os.getenv('CHUNK_OVERLAP', '200'))
+            if value < 0:
+                raise ValueError("CHUNK_OVERLAP must be non-negative")
+            return value
+        except ValueError as e:
+            raise ConfigurationError(f"Invalid CHUNK_OVERLAP: {e}")
+
+    @property
+    def EMBEDDING_MODEL(self) -> str:
+        """OpenAI embedding model for LlamaIndex."""
+        return os.getenv('EMBEDDING_MODEL', 'text-embedding-3-small')
+
+    @property
+    def LLM_MODEL(self) -> str:
+        """OpenAI LLM model for text generation."""
+        return os.getenv('LLM_MODEL', 'gpt-4o-mini')
+
+    @property
+    def SIMILARITY_TOP_K(self) -> int:
+        """Number of similar documents to retrieve."""
+        try:
+            value = int(os.getenv('SIMILARITY_TOP_K', '10'))
+            if value <= 0:
+                raise ValueError("SIMILARITY_TOP_K must be positive")
+            return value
+        except ValueError as e:
+            raise ConfigurationError(f"Invalid SIMILARITY_TOP_K: {e}")
+
+    @property
+    def SIMILARITY_CUTOFF(self) -> float:
+        """Minimum similarity score for search results."""
+        try:
+            value = float(os.getenv('SIMILARITY_CUTOFF', '0.7'))
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"SIMILARITY_CUTOFF must be between 0.0 and 1.0, got {value}")
+            return value
+        except ValueError as e:
+            raise ConfigurationError(f"Invalid SIMILARITY_CUTOFF: {e}")
+
+    @property
+    def COLLECTION_NAME(self) -> str:
+        """Name of the document collection."""
+        return os.getenv('COLLECTION_NAME', 'rag_documents')
+
+    # System Components Configuration
+    @property
+    def ENABLE_PROMETHEUS_METRICS(self) -> bool:
+        """Whether to enable Prometheus metrics collection."""
+        return os.getenv('ENABLE_PROMETHEUS_METRICS', 'true').lower() in ('true', '1', 'yes', 'on')
+
+    @property
+    def ENABLE_RATE_LIMITING(self) -> bool:
+        """Whether to enable request rate limiting."""
+        return os.getenv('ENABLE_RATE_LIMITING', 'true').lower() in ('true', '1', 'yes', 'on')
+
+    @property
+    def RATE_LIMIT_REQUESTS(self) -> int:
+        """Maximum requests per time window for rate limiting."""
+        try:
+            value = int(os.getenv('RATE_LIMIT_REQUESTS', '100'))
+            if value <= 0:
+                raise ValueError("RATE_LIMIT_REQUESTS must be positive")
+            return value
+        except ValueError as e:
+            raise ConfigurationError(f"Invalid RATE_LIMIT_REQUESTS: {e}")
+
+    @property
+    def RATE_LIMIT_WINDOW(self) -> int:
+        """Time window in seconds for rate limiting."""
+        try:
+            value = int(os.getenv('RATE_LIMIT_WINDOW', '60'))
+            if value <= 0:
+                raise ValueError("RATE_LIMIT_WINDOW must be positive")
+            return value
+        except ValueError as e:
+            raise ConfigurationError(f"Invalid RATE_LIMIT_WINDOW: {e}")
+
+    @property
+    def USE_LOGURU(self) -> bool:
+        """Whether to use loguru for structured logging instead of standard logging."""
+        return os.getenv('USE_LOGURU', 'true').lower() in ('true', '1', 'yes', 'on')
+
+    @property
+    def ENABLE_RETRY_LOGIC(self) -> bool:
+        """Whether to enable tenacity-based retry logic for resilient operations."""
+        return os.getenv('ENABLE_RETRY_LOGIC', 'true').lower() in ('true', '1', 'yes', 'on')
+
     def validate(self) -> None:
         """
         Validate all required configuration values.
@@ -147,7 +281,7 @@ class Config:
 
         # Check required string fields
         required_fields = {
-            'TAVILY_API_KEY': self.TAVILY_API_KEY,
+            'SEARCH_API_KEY': self.SEARCH_API_KEY,
             'OPENAI_API_KEY': self.OPENAI_API_KEY,
         }
 
@@ -215,13 +349,22 @@ class Config:
         """
         return {
             'VECTOR_STORE_PATH': self.VECTOR_STORE_PATH,
-            'TAVILY_API_KEY': '***' if self.TAVILY_API_KEY else '',
+            'SEARCH_API_KEY': '***' if self.SEARCH_API_KEY else '',
             'OPENAI_API_KEY': '***' if self.OPENAI_API_KEY else '',
+            'OPENAI_BASE_URL': self.OPENAI_BASE_URL,
+            'SEARCH_BASE_URL': self.SEARCH_BASE_URL,
             'SIMILARITY_THRESHOLD': self.SIMILARITY_THRESHOLD,
             'ENVIRONMENT': self.ENVIRONMENT,
             'LOG_LEVEL': self.LOG_LEVEL,
             'MAX_RETRIES': self.MAX_RETRIES,
             'TIMEOUT_SECONDS': self.TIMEOUT_SECONDS,
+            'USE_LLAMAINDEX': self.USE_LLAMAINDEX,
+            'ENABLE_PROMETHEUS_METRICS': self.ENABLE_PROMETHEUS_METRICS,
+            'ENABLE_RATE_LIMITING': self.ENABLE_RATE_LIMITING,
+            'RATE_LIMIT_REQUESTS': self.RATE_LIMIT_REQUESTS,
+            'RATE_LIMIT_WINDOW': self.RATE_LIMIT_WINDOW,
+            'USE_LOGURU': self.USE_LOGURU,
+            'ENABLE_RETRY_LOGIC': self.ENABLE_RETRY_LOGIC,
         }
 
     def __repr__(self) -> str:
