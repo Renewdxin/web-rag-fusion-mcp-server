@@ -173,11 +173,16 @@ class RAGMCPServer:
             return await self._list_tools()
         
         @self.server.call_tool()
-        async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> CallToolResult:
+        async def handle_call_tool(name: str, arguments: Dict[str, Any]):
             result = await self._call_tool(name, arguments)
-            # Make sure we're returning the CallToolResult properly
-            self.logger.debug(f"Call tool result type: {type(result)}")
-            return result
+            # Return the content directly, not the CallToolResult wrapper
+            if isinstance(result, CallToolResult):
+                self.logger.debug(f"Returning CallToolResult.content: {len(result.content)} items")
+                return result.content
+            else:
+                # Fallback - should not happen with current implementation
+                self.logger.warning(f"Unexpected result type: {type(result)}")
+                return [TextContent(type="text", text=str(result))]
         
         # Register resource and prompt handlers (empty for now)
         @self.server.list_resources()
