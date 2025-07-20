@@ -6,61 +6,18 @@ services:
     build:
       context: .
       target: production
-      args:
-        BUILD_DATE: ${BUILD_DATE:-$(date -u +'%Y-%m-%dT%H:%M:%SZ')}
-        VERSION: ${VERSION:-latest}
-        VCS_REF: ${VCS_REF:-$(git rev-parse HEAD)}
     container_name: rag-mcp-server
     restart: unless-stopped
-    environment:
-      # Core Environment
-      - ENVIRONMENT=production
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      
-      # System Components (New Optimized Features)
-      - ENABLE_PROMETHEUS_METRICS=${ENABLE_PROMETHEUS_METRICS:-true}
-      - ENABLE_RATE_LIMITING=${ENABLE_RATE_LIMITING:-true}
-      - USE_LOGURU=${USE_LOGURU:-true}
-      - ENABLE_RETRY_LOGIC=${ENABLE_RETRY_LOGIC:-true}
-      
-      # Rate Limiting Configuration
-      - RATE_LIMIT_REQUESTS=${RATE_LIMIT_REQUESTS:-100}
-      - RATE_LIMIT_WINDOW=${RATE_LIMIT_WINDOW:-60}
-      
-      # Vector Store & RAG Configuration
-      - VECTOR_STORE_PATH=/app/data
-      - COLLECTION_NAME=${COLLECTION_NAME:-rag_documents}
-      - SIMILARITY_THRESHOLD=${SIMILARITY_THRESHOLD:-0.75}
-      - USE_LLAMAINDEX=${USE_LLAMAINDEX:-true}
-      
-      # API Keys
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - TAVILY_API_KEY=${TAVILY_API_KEY}
-      
-      # Performance Settings
-      - MAX_RETRIES=${MAX_RETRIES:-3}
-      - TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-30}
-      - WEB_SEARCH_TIMEOUT=${WEB_SEARCH_TIMEOUT:-45}
-      - TAVILY_QUOTA_LIMIT=${TAVILY_QUOTA_LIMIT:-1000}
-      
-      # OpenAI Models
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-text-embedding-3-small}
-      - LLM_MODEL=${LLM_MODEL:-gpt-3.5-turbo}
-      
-      # Chunking Configuration
-      - CHUNK_SIZE=${CHUNK_SIZE:-1024}
-      - CHUNK_OVERLAP=${CHUNK_OVERLAP:-200}
-      - SIMILARITY_TOP_K=${SIMILARITY_TOP_K:-10}
-      - SIMILARITY_CUTOFF=${SIMILARITY_CUTOFF:-0.6}
-      
+    env_file:
+      - .env
     volumes:
       - rag_data:/app/data
       - rag_logs:/app/logs
-      - ./documents:/app/documents:ro  # Mount local documents directory
+      - ./documents:/app/documents:ro
     networks:
       - rag-network
     ports:
-      - "8000:8000"  # For future HTTP API
+      - "8000:8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import sys; sys.path.insert(0, '/app'); from config.settings import config; config.validate()"]
       interval: 30s
@@ -74,36 +31,8 @@ services:
       context: .
       target: development
     container_name: rag-mcp-dev
-    environment:
-      # Core Environment
-      - ENVIRONMENT=development
-      - LOG_LEVEL=DEBUG
-      
-      # System Components (Dev Settings)
-      - ENABLE_PROMETHEUS_METRICS=true
-      - ENABLE_RATE_LIMITING=true
-      - USE_LOGURU=true
-      - ENABLE_RETRY_LOGIC=true
-      
-      # Rate Limiting (Relaxed for Development)
-      - RATE_LIMIT_REQUESTS=200
-      - RATE_LIMIT_WINDOW=60
-      
-      # Vector Store & RAG
-      - VECTOR_STORE_PATH=/app/dev_data
-      - COLLECTION_NAME=dev_documents
-      - SIMILARITY_THRESHOLD=0.6
-      - USE_LLAMAINDEX=true
-      
-      # API Keys
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - TAVILY_API_KEY=${TAVILY_API_KEY}
-      
-      # Development Performance
-      - MAX_RETRIES=2
-      - TIMEOUT_SECONDS=15
-      - WEB_SEARCH_TIMEOUT=30
-      
+    env_file:
+      - .env
     volumes:
       - ./src:/app/src
       - ./config:/app/config
@@ -161,86 +90,14 @@ services:
     profiles:
       - monitoring
 
-  # Redis for enhanced caching (optional)
-  redis:
-    image: redis:7-alpine
-    container_name: rag-redis
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
-    networks:
-      - rag-network
-    profiles:
-      - cache
-
-  # PostgreSQL for metadata storage (optional)
-  postgres:
-    image: postgres:15-alpine
-    container_name: rag-postgres
-    restart: unless-stopped
-    environment:
-      - POSTGRES_DB=${POSTGRES_DB:-ragmcp}
-      - POSTGRES_USER=${POSTGRES_USER:-raguser}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-ragpass}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    ports:
-      - "5432:5432"
-    networks:
-      - rag-network
-    profiles:
-      - database
-
-  # Document processor service (for background processing)
-  doc-processor:
-    build:
-      context: .
-      target: production
-    container_name: rag-doc-processor
-    restart: unless-stopped
-    environment:
-      - ENVIRONMENT=production
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - VECTOR_STORE_PATH=/app/data
-      - PROCESSING_MODE=batch
-      - WATCH_DIRECTORY=/app/documents
-    volumes:
-      - rag_data:/app/data
-      - ./documents:/app/documents
-      - rag_logs:/app/logs
-    command: ["python", "src/document_processor.py", "--watch"]
-    networks:
-      - rag-network
-    profiles:
-      - processor
-    depends_on:
-      - rag-mcp-server
-
 volumes:
   rag_data:
-    driver: local
   rag_logs:
-    driver: local
   rag_dev_data:
-    driver: local
   rag_dev_logs:
-    driver: local
   prometheus_data:
-    driver: local
   grafana_data:
-    driver: local
-  redis_data:
-    driver: local
-  postgres_data:
-    driver: local
 
 networks:
   rag-network:
     driver: bridge
-    ipam:
-      config:
-        - subnet: 172.20.0.0/16
