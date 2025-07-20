@@ -833,10 +833,6 @@ class RAGMCPServer:
             search_results, metadata = await web_search.search(
                 query=query,
                 max_results=max_results,
-                search_depth=search_depth,
-                include_answer=include_answer,
-                include_raw_content=include_raw_content,
-                exclude_domains=exclude_domains,
             )
 
             search_time = time.time() - search_start_time

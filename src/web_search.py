@@ -39,6 +39,16 @@ class SearchResult:
     snippet: str = ""
     score: float = 0.0
     metadata: Optional[Dict[str, Any]] = field(default_factory=dict)
+    
+    @property
+    def source_domain(self) -> str:
+        """Extract domain from URL."""
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(self.url)
+            return parsed.netloc or "Unknown"
+        except Exception:
+            return "Unknown"
 
 
 # Legacy compatibility
